@@ -1,0 +1,18 @@
+export const he = {
+  appName: "eyesteel",
+  uploadTitle: "צפיין IFC לפלדה",
+  uploadSubtitle: "העלה מודל IFC של Tekla וצפה בו בצורה פשוטה מהנייד או מהטאבלט",
+  openModel: "פתח מודל",
+  selectFile: "בחר קובץ IFC",
+  loading: "טוען",
+  parsing: "מנתח",
+  ready: "מוכן",
+  management: "ניהול",
+  production: "ייצור",
+  installation: "הרכבה",
+  search: "חיפוש",
+  layers: "שכבות",
+  resetView: "איפוס תצוגה",
+  fitAll: "הצג הכל",
+  backToUpload: "החלפת קובץ",
+};
