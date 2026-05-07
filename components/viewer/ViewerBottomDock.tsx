@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
-import { cn } from "@/lib/utils";
 import {
-  VIEW_SECTION_LABELS_HE,
-  VIEW_SECTION_PRESETS_ORDER,
-  type ViewSectionPresetId,
-} from "@/lib/viewer/view-section-presets";
+  VIEW_MODE_LABELS_HE,
+  VIEW_MODE_ORDER,
+  type ViewModeId,
+} from "@/lib/viewer/view-mode-presets";
+import { cn } from "@/lib/utils";
 
 type SelectionMode = "part" | "assembly";
 
@@ -20,8 +20,8 @@ interface Props {
   onMeasurementToggle: () => void;
   onMeasurementClear: () => void;
   onMeasurementFinish: () => void;
-  onViewPreset: (preset: ViewSectionPresetId) => void;
-  onBeginFreeSection: () => void;
+  onApplyViewMode: (mode: ViewModeId) => void;
+  viewModeDisabled?: boolean;
 }
 
 /**
@@ -35,8 +35,8 @@ export function ViewerBottomDock({
   onMeasurementToggle,
   onMeasurementClear,
   onMeasurementFinish,
-  onViewPreset,
-  onBeginFreeSection,
+  onApplyViewMode,
+  viewModeDisabled = false,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -64,6 +64,14 @@ export function ViewerBottomDock({
     [onSelectionModeChange],
   );
 
+  const pickViewMode = useCallback(
+    (m: ViewModeId) => {
+      onApplyViewMode(m);
+      setViewOpen(false);
+    },
+    [onApplyViewMode],
+  );
+
   return (
     <div
       ref={wrapRef}
@@ -72,7 +80,7 @@ export function ViewerBottomDock({
       <div
         className={cn(
           "pointer-events-auto flex items-center gap-1 rounded-2xl border border-zinc-600 bg-zinc-950/95 px-2 py-2 shadow-2xl backdrop-blur-sm transition-[width] duration-200",
-          measurementActive ? "max-w-[min(100vw-1rem,28rem)]" : "max-w-[min(100vw-1rem,20rem)]",
+          measurementActive ? "max-w-[min(100vw-1rem,28rem)]" : "max-w-[min(100vw-1rem,18rem)]",
         )}
         dir="rtl"
       >
@@ -128,49 +136,30 @@ export function ViewerBottomDock({
         <div className="relative shrink-0">
           <Button
             type="button"
-            variant={viewOpen ? "default" : "secondary"}
-            className={cn(
-              "h-10 shrink-0 px-3 text-sm font-semibold",
-              viewOpen && "ring-2 ring-sky-400/70 ring-offset-2 ring-offset-zinc-950",
-            )}
+            variant="secondary"
+            className="h-10 gap-1 px-3 text-sm font-semibold disabled:opacity-40"
             aria-expanded={viewOpen}
-            disabled={measurementActive}
-            title={measurementActive ? "כבה את מצב המדידה כדי להשתמש במבט" : undefined}
-            onClick={() => setViewOpen((o) => !o)}
+            disabled={viewModeDisabled}
+            onClick={() => !viewModeDisabled && setViewOpen((o) => !o)}
           >
             מבט
-            <span className="mr-1 text-xs opacity-80">{viewOpen ? "▼" : "▲"}</span>
+            <span className="text-xs opacity-80">{viewOpen ? "▼" : "▲"}</span>
           </Button>
-          {viewOpen && (
+          {viewOpen && !viewModeDisabled && (
             <div
-              className="absolute bottom-[calc(100%+6px)] left-1/2 z-[60] w-[min(22rem,calc(100vw-2rem))] -translate-x-1/2 rounded-xl border border-zinc-600 bg-zinc-950 p-2 shadow-xl"
+              className="absolute bottom-[calc(100%+6px)] left-1/2 z-50 grid w-[11rem] max-w-[min(11rem,calc(100vw-2rem))] -translate-x-1/2 grid-cols-2 gap-px overflow-hidden rounded-xl border border-zinc-600 bg-zinc-800 p-1 shadow-xl"
               dir="rtl"
             >
-              <div className="grid grid-cols-2 gap-2">
-                {VIEW_SECTION_PRESETS_ORDER.map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    className="rounded-xl bg-zinc-800 px-2 py-4 text-center text-base font-semibold text-zinc-100 transition-colors hover:bg-zinc-700 active:bg-zinc-600"
-                    onClick={() => {
-                      onViewPreset(preset);
-                      setViewOpen(false);
-                    }}
-                  >
-                    {VIEW_SECTION_LABELS_HE[preset]}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="mt-2 w-full rounded-xl border border-zinc-600 bg-zinc-900 py-4 text-center text-base font-semibold text-zinc-100 transition-colors hover:bg-zinc-800"
-                onClick={() => {
-                  onBeginFreeSection();
-                  setViewOpen(false);
-                }}
-              >
-                {VIEW_SECTION_LABELS_HE.free}
-              </button>
+              {VIEW_MODE_ORDER.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  className="rounded-lg bg-zinc-900 px-3 py-2.5 text-center text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700"
+                  onClick={() => pickViewMode(id)}
+                >
+                  {VIEW_MODE_LABELS_HE[id]}
+                </button>
+              ))}
             </div>
           )}
         </div>

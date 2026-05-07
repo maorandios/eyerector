@@ -7,29 +7,34 @@ import CameraControls from "camera-controls";
 import { LodMode } from "@thatopen/fragments";
 import type { ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
-import { useViewSectionStore } from "@/lib/state/view-section-store";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
-import { ViewSectionController } from "@/lib/viewer/view-section-controller";
-import type { ViewSectionPresetId } from "@/lib/viewer/view-section-presets";
 import {
   SELECTION_HIGHLIGHT_COLOR,
   applyEyeSteelRendererDefaults,
   applyEyeSteelSceneBackdrop,
   createEyeSteelLights,
 } from "@/lib/viewer/visual-policy";
+import {
+  cameraUpForViewMode,
+  eyePositionFromCenter,
+  type ViewModeId,
+} from "@/lib/viewer/view-mode-presets";
 
 interface PickHit {
   localId: number;
   itemId: number;
 }
 
-export type ViewerToolMode = "none" | "measurement" | "free_section_pick";
+export type ViewerToolMode = "none" | "measurement";
 
 /** Tap classification — fingers jitter more than mouse cursors. */
 const TAP_SLOP_SQ_MOUSE = 144;
 const TAP_SLOP_SQ_TOUCH = 900;
 const TAP_MAX_MS_MOUSE = 700;
 const TAP_MAX_MS_TOUCH = 950;
+
+const ORTHO_MARGIN = 1.08;
+const ORTHO_DISTANCE_K = 1.75;
 
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
@@ -53,7 +58,6 @@ export class ViewerEngine {
   /** `FragmentsManager.list` is only valid after {@link OBC.FragmentsManager.init}. */
   private fragmentsClippingListenersInstalled = false;
   private readonly measurementController: MeasurementController;
-  private readonly viewSectionController: ViewSectionController;
   private viewerTool: ViewerToolMode = "none";
   /** Restore after measurement — only used when we disable orbit on touch (see measurementSuppressedControls). */
   private measurementControlsEnabledSnapshot = true;
@@ -62,11 +66,20 @@ export class ViewerEngine {
   /** Browsers often emit synthetic `pointerType: mouse` after touch; ignore briefly so measurement doesn't double-fire. */
   private suppressPrimaryMouseDownUntilMs = 0;
 
+  private perspectiveCamera!: THREE.PerspectiveCamera;
+  private readonly orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 1e6);
+  private boundUseCamera:
+    | ((cam: THREE.PerspectiveCamera | THREE.OrthographicCamera) => void)
+    | null = null;
+  /** Non-null while an orthographic preset is active (resize refit + dispose cleanup). */
+  private activeOrthoViewMode: ViewModeId | null = null;
+  private orthoResizeHandler: (() => void) | null = null;
+  private readonly tmpVecEye = new THREE.Vector3();
+
   constructor(container: HTMLDivElement) {
     this.container = container;
     this.components = new OBC.Components();
     this.measurementController = new MeasurementController(this.components);
-    this.viewSectionController = new ViewSectionController(this.components);
     this.setupWorld();
   }
 
@@ -85,16 +98,18 @@ export class ViewerEngine {
     const sceneRoot = this.world.scene.three as THREE.Scene;
     sceneRoot.up.set(0, 1, 0);
     const camThree = this.world.camera.three as THREE.PerspectiveCamera;
+    this.perspectiveCamera = camThree;
     camThree.up.copy(sceneRoot.up);
     this.world.camera.controls?.updateCameraUp();
     this.world.camera.controls?.setLookAt(14, 14, 14, 0, 0, 0, false);
     this.applySnappyCameraControls();
+    const ctrl0 = this.world.camera.controls;
+    if (ctrl0) this.applyPerspectiveNavigationBindings(ctrl0);
     this.applyPerspectiveClipPlanes();
     this.installFragmentCameraSyncOnce();
     this.installOrbitPivotOnRotateStart();
 
     this.measurementController.attach(this.world);
-    this.viewSectionController.attach(this.world);
 
     const scene = this.world.scene.three as THREE.Scene;
     applyEyeSteelSceneBackdrop(scene);
@@ -151,6 +166,159 @@ export class ViewerEngine {
       persp.far = 1e6;
     }
     persp.updateProjectionMatrix();
+  }
+
+  private fitAllPerspective() {
+    if (!this.modelObject) return;
+    this.applyPerspectiveClipPlanes(this.modelObject);
+    const box = new THREE.Box3().setFromObject(this.modelObject);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    this.frameCameraIsoDiagonal(sphere.center, sphere.radius);
+  }
+
+  private syncFragmentsAfterCameraSwap() {
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (fragments.initialized) void fragments.core.update(true);
+  }
+
+  private updateOrthoFrustum(box: THREE.Box3) {
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    const halfBase = 0.5 * maxDim * ORTHO_MARGIN;
+    const renderer = this.world.renderer as OBF.RendererWith2D;
+    const el = renderer.container;
+    const w = el.clientWidth;
+    const h = el.clientHeight;
+    const aspect = w > 0 && h > 0 ? w / h : 1;
+    const ortho = this.orthographicCamera;
+    if (aspect >= 1) {
+      const halfW = halfBase * aspect;
+      ortho.left = -halfW;
+      ortho.right = halfW;
+      ortho.top = halfBase;
+      ortho.bottom = -halfBase;
+    } else {
+      const halfH = halfBase / aspect;
+      ortho.left = -halfBase;
+      ortho.right = halfBase;
+      ortho.top = halfH;
+      ortho.bottom = -halfH;
+    }
+    ortho.near = 0.01;
+    ortho.far = 1e6;
+    ortho.updateProjectionMatrix();
+  }
+
+  /**
+   * CameraControls picks DOLLY vs ZOOM from the **initial** camera type only; assigning `ctrl.camera`
+   * does not refresh bindings. Keep orthographic מבט on zoom + pan so wheel adjusts {@link THREE.OrthographicCamera.zoom}
+   * instead of dollying (which reads like clipping through cuts).
+   */
+  private applyPerspectiveNavigationBindings(ctrl: CameraControls) {
+    const A = CameraControls.ACTION;
+    ctrl.mouseButtons.left = A.ROTATE;
+    ctrl.mouseButtons.middle = A.DOLLY;
+    ctrl.mouseButtons.right = A.TRUCK;
+    ctrl.mouseButtons.wheel = A.DOLLY;
+    ctrl.touches.one = A.TOUCH_ROTATE;
+    ctrl.touches.two = A.TOUCH_DOLLY_TRUCK;
+    ctrl.touches.three = A.TOUCH_TRUCK;
+  }
+
+  /** Orthographic preset: no orbit — pan (screen / truck) + orthographic zoom only. */
+  private applyOrthographicPlanNavigationBindings(ctrl: CameraControls) {
+    const A = CameraControls.ACTION;
+    ctrl.mouseButtons.left = A.SCREEN_PAN;
+    ctrl.mouseButtons.middle = A.ZOOM;
+    ctrl.mouseButtons.right = A.TRUCK;
+    ctrl.mouseButtons.wheel = A.ZOOM;
+    ctrl.touches.one = A.TOUCH_SCREEN_PAN;
+    ctrl.touches.two = A.TOUCH_ZOOM_TRUCK;
+    ctrl.touches.three = A.TOUCH_TRUCK;
+  }
+
+  private attachOrthoResizeListener() {
+    this.detachOrthoResizeListener();
+    const renderer = this.world.renderer as OBF.RendererWith2D;
+    this.orthoResizeHandler = () => {
+      if (this.disposed || !this.modelObject || this.activeOrthoViewMode === null) return;
+      const box = new THREE.Box3().setFromObject(this.modelObject);
+      if (!box.isEmpty()) this.updateOrthoFrustum(box);
+    };
+    renderer.onResize.add(this.orthoResizeHandler);
+  }
+
+  private detachOrthoResizeListener() {
+    if (!this.orthoResizeHandler) return;
+    const renderer = this.world.renderer as OBF.RendererWith2D;
+    renderer.onResize.remove(this.orthoResizeHandler);
+    this.orthoResizeHandler = null;
+  }
+
+  /**
+   * Orthographic preset along ±world axes (Y‑up scene). Swaps {@link OBC.SimpleCamera.three} and syncs fragments.
+   * @returns false when no model or empty bounds.
+   */
+  applyViewMode(mode: ViewModeId): boolean {
+    if (this.disposed || !this.modelObject) return false;
+    const box = new THREE.Box3().setFromObject(this.modelObject);
+    if (box.isEmpty()) return false;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const span = Math.max(size.x, size.y, size.z, 1);
+    const distance = ORTHO_DISTANCE_K * span;
+
+    this.updateOrthoFrustum(box);
+
+    const simpleCam = this.world.camera as OBC.SimpleCamera;
+    const ctrl = simpleCam.controls;
+    const ortho = this.orthographicCamera;
+
+    ortho.up.copy(cameraUpForViewMode(mode));
+
+    simpleCam.three = ortho;
+    if (ctrl) {
+      ctrl.camera = ortho;
+      this.applyOrthographicPlanNavigationBindings(ctrl);
+      ortho.zoom = 1;
+      void ctrl.zoomTo(ortho.zoom, false);
+    }
+
+    const eye = eyePositionFromCenter(mode, center, distance, this.tmpVecEye);
+    ctrl?.setOrbitPoint(center.x, center.y, center.z);
+    ctrl?.updateCameraUp();
+    ctrl?.setLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, false);
+
+    this.boundUseCamera?.(ortho);
+    this.syncFragmentsAfterCameraSwap();
+
+    this.activeOrthoViewMode = mode;
+    this.attachOrthoResizeListener();
+    return true;
+  }
+
+  /** Restore perspective camera, fragment projection, and iso frame (same as exiting מבט). */
+  exitViewMode(): void {
+    if (this.disposed || this.activeOrthoViewMode === null) return;
+    this.detachOrthoResizeListener();
+    this.activeOrthoViewMode = null;
+
+    const simpleCam = this.world.camera as OBC.SimpleCamera;
+    const ctrl = simpleCam.controls;
+    simpleCam.three = this.perspectiveCamera;
+    if (ctrl) {
+      ctrl.camera = this.perspectiveCamera;
+      this.applyPerspectiveNavigationBindings(ctrl);
+    }
+
+    this.perspectiveCamera.up.set(0, 1, 0);
+    (this.world.scene.three as THREE.Scene).up.set(0, 1, 0);
+    ctrl?.updateCameraUp();
+
+    this.boundUseCamera?.(this.perspectiveCamera);
+    this.syncFragmentsAfterCameraSwap();
+
+    if (this.modelObject) this.fitAllPerspective();
   }
 
   /** Library sets smoothTime=0.2 on CameraControls — feels sluggish while orbiting. */
@@ -269,8 +437,8 @@ export class ViewerEngine {
 
   async loadFile(file: File) {
     if (this.disposed) return;
+    if (this.activeOrthoViewMode !== null) this.exitViewMode();
     this.measurementController.clearAll();
-    this.viewSectionController.clearForNewModel();
     const { model } = await loadIfcModel(this.components, file);
     this.ensureFragmentsClippingListeners();
     const casted = model as {
@@ -283,12 +451,9 @@ export class ViewerEngine {
     this.modelId = casted.modelId;
     this.world.scene.three.add(casted.object);
 
-    const cam = this.world.camera.three;
-    if (cam && (cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
-      casted.useCamera(cam as THREE.PerspectiveCamera);
-    } else if (cam) {
-      casted.useCamera(cam as THREE.OrthographicCamera);
-    }
+    this.boundUseCamera = casted.useCamera.bind(casted);
+    const cam = this.world.camera.three as THREE.PerspectiveCamera;
+    this.boundUseCamera(cam);
 
     const fragments = this.components.get(OBC.FragmentsManager);
     void fragments.core.update(true);
@@ -382,14 +547,13 @@ export class ViewerEngine {
     if (host) host.style.touchAction = "none";
   }
 
-  /** Measurement / free-section pick on touch: orbit off so gestures don't fight taps. Desktop: keep orbiting when allowed. */
+  /** Measurement on touch: orbit off so gestures don't fight taps. Desktop: keep orbiting when allowed. */
   setViewerTool(tool: ViewerToolMode) {
     if (this.disposed) return;
     this.viewerTool = tool;
     const ctrl = this.world.camera.controls;
 
     if (tool === "measurement") {
-      this.viewSectionController.abortFreePick();
       if (ctrl && MeasurementController.prefersTouchLikeMeasurement()) {
         this.measurementControlsEnabledSnapshot = ctrl.enabled;
         ctrl.enabled = false;
@@ -397,14 +561,6 @@ export class ViewerEngine {
       }
       this.reinstateCanvasTouchBlocking();
       this.measurementController.activate();
-    } else if (tool === "free_section_pick") {
-      this.measurementController.deactivate();
-      if (ctrl && MeasurementController.prefersTouchLikeMeasurement()) {
-        this.measurementControlsEnabledSnapshot = ctrl.enabled;
-        ctrl.enabled = false;
-        this.measurementSuppressedControls = true;
-      }
-      this.reinstateCanvasTouchBlocking();
     } else {
       this.measurementController.deactivate();
       if (ctrl && this.measurementSuppressedControls) {
@@ -423,36 +579,6 @@ export class ViewerEngine {
     this.measurementController.clearAll();
   }
 
-  applyViewPreset(preset: ViewSectionPresetId) {
-    if (this.disposed || !this.modelObject) return;
-    this.viewSectionController.applyPreset(preset, this.modelObject);
-  }
-
-  beginFreeSectionPick() {
-    if (this.disposed || !this.modelObject) return;
-    this.viewSectionController.beginFreePick(this.modelObject);
-  }
-
-  abortFreeSectionPick() {
-    if (this.disposed) return;
-    this.viewSectionController.abortFreePick();
-  }
-
-  cancelViewSection() {
-    if (this.disposed) return;
-    this.viewSectionController.cancelSection();
-  }
-
-  setViewSectionDepth(offset: number) {
-    if (this.disposed) return;
-    this.viewSectionController.setDepthOffset(offset);
-  }
-
-  flipViewSection() {
-    if (this.disposed) return;
-    this.viewSectionController.flip();
-  }
-
   /** Measurement taps on touch/pencil — commit on pointerdown so we don't rely on pointerup (often broken / paired incorrectly on mobile). */
   private commitMeasurementTap(canvas: HTMLCanvasElement, clientX: number, clientY: number, pe: PointerEvent) {
     // Only suppress synthetic mouse after real touch/pen — compact viewport uses real mouse in DevTools;
@@ -467,27 +593,6 @@ export class ViewerEngine {
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
     void this.measurementController.tapCommit(ndc);
-  }
-
-  private async commitFreeSectionTap(
-    canvas: HTMLCanvasElement,
-    clientX: number,
-    clientY: number,
-    pe: PointerEvent,
-  ) {
-    if (pe.pointerType === "touch" || pe.pointerType === "pen") {
-      this.suppressPrimaryMouseDownUntilMs = Date.now() + 450;
-    }
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    const ndc = new THREE.Vector2(
-      ((clientX - rect.left) / rect.width) * 2 - 1,
-      -((clientY - rect.top) / rect.height) * 2 + 1,
-    );
-    await this.viewSectionController.tryPick(ndc);
-    if (useViewSectionStore.getState().freePickStep === "active") {
-      this.setViewerTool("none");
-    }
   }
 
   private installPointerListeners() {
@@ -518,18 +623,14 @@ export class ViewerEngine {
 
     this.hostMeasurePointerDownCapture = (event: PointerEvent) => {
       if (this.disposed) return;
-      if (this.viewerTool !== "measurement" && this.viewerTool !== "free_section_pick") return;
+      if (this.viewerTool !== "measurement") return;
       if (!this.shouldInstantMeasurementTap(event)) return;
       const { clientX: x, clientY: y } = event;
       const rect = canvas.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
       if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return;
       syncNdcFromClient(x, y);
-      if (this.viewerTool === "measurement") {
-        this.commitMeasurementTap(canvas, x, y, event);
-      } else {
-        void this.commitFreeSectionTap(canvas, x, y, event);
-      }
+      this.commitMeasurementTap(canvas, x, y, event);
     };
     this.container.addEventListener("pointerdown", this.hostMeasurePointerDownCapture, true);
 
@@ -557,11 +658,8 @@ export class ViewerEngine {
         return;
       }
 
-      /* Instant measurement / free-section picks use container capture (see hostMeasurePointerDownCapture). */
-      if (
-        (this.viewerTool === "measurement" || this.viewerTool === "free_section_pick") &&
-        this.shouldInstantMeasurementTap(event)
-      ) {
+      /* Instant measurement picks use container capture (see hostMeasurePointerDownCapture). */
+      if (this.viewerTool === "measurement" && this.shouldInstantMeasurementTap(event)) {
         return;
       }
 
@@ -604,11 +702,6 @@ export class ViewerEngine {
 
       if (this.viewerTool === "measurement") {
         this.commitMeasurementTap(canvas, useX, useY, event);
-        return;
-      }
-
-      if (this.viewerTool === "free_section_pick") {
-        await this.commitFreeSectionTap(canvas, useX, useY, event);
         return;
       }
 
@@ -769,6 +862,10 @@ export class ViewerEngine {
 
   resetView() {
     if (this.disposed) return;
+    if (this.activeOrthoViewMode !== null) {
+      this.exitViewMode();
+      return;
+    }
     if (this.modelObject) {
       const box = new THREE.Box3().setFromObject(this.modelObject);
       const sphere = box.getBoundingSphere(new THREE.Sphere());
@@ -785,17 +882,18 @@ export class ViewerEngine {
   fitAll() {
     if (this.disposed) return;
     if (!this.modelObject) return;
-    this.applyPerspectiveClipPlanes(this.modelObject);
-    const box = new THREE.Box3().setFromObject(this.modelObject);
-    const sphere = box.getBoundingSphere(new THREE.Sphere());
-    this.frameCameraIsoDiagonal(sphere.center, sphere.radius);
+    if (this.activeOrthoViewMode !== null) {
+      this.exitViewMode();
+      return;
+    }
+    this.fitAllPerspective();
   }
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
     try {
-      if (this.viewerTool === "measurement" || this.viewerTool === "free_section_pick") {
+      if (this.viewerTool === "measurement") {
         const ctrl = this.world.camera.controls;
         if (ctrl && this.measurementSuppressedControls) {
           ctrl.enabled = this.measurementControlsEnabledSnapshot;
@@ -803,8 +901,24 @@ export class ViewerEngine {
         this.measurementSuppressedControls = false;
       }
       this.viewerTool = "none";
-      this.viewSectionController.dispose();
       this.measurementController.shutdown();
+      if (this.activeOrthoViewMode !== null) {
+        this.detachOrthoResizeListener();
+        this.activeOrthoViewMode = null;
+        const simpleCam = this.world.camera as OBC.SimpleCamera;
+        simpleCam.three = this.perspectiveCamera;
+        const ctrl = simpleCam.controls;
+        if (ctrl) {
+          ctrl.camera = this.perspectiveCamera;
+          this.applyPerspectiveNavigationBindings(ctrl);
+        }
+        this.perspectiveCamera.up.set(0, 1, 0);
+        (this.world.scene.three as THREE.Scene).up.set(0, 1, 0);
+        ctrl?.updateCameraUp();
+        if (this.boundUseCamera) this.boundUseCamera(this.perspectiveCamera);
+        const fragments = this.components.get(OBC.FragmentsManager);
+        if (fragments.initialized) void fragments.core.update(true);
+      }
       for (const light of this.viewerLights) {
         this.world.scene.three.remove(light);
         light.dispose();

@@ -6,14 +6,15 @@ import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { CompactModeNav } from "@/components/viewer/CompactModeNav";
 import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
-import { ViewSectionControls } from "@/components/viewer/ViewSectionControls";
+import { ViewModeActiveBar } from "@/components/viewer/ViewModeActiveBar";
 import { Button } from "@/components/ui/button";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
 import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
+import { useViewerViewStore } from "@/lib/state/viewer-view-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
-import type { ViewSectionPresetId } from "@/lib/viewer/view-section-presets";
+import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import { he } from "@/lib/i18n/he";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
 import { isAnalyzerBoltRow } from "@/types/domain";
@@ -66,6 +67,10 @@ export default function ViewerPage() {
   const viewerTool = useViewerToolStore((s) => s.activeTool);
   const setViewerTool = useViewerToolStore((s) => s.setActiveTool);
 
+  const viewMode = useViewerViewStore((s) => s.viewMode);
+  const setOrthographicView = useViewerViewStore((s) => s.setOrthographicView);
+  const clearViewModeStore = useViewerViewStore((s) => s.clearView);
+
   useEffect(() => {
     if (!engine) return;
     engine.setViewerTool(viewerTool);
@@ -81,6 +86,7 @@ export default function ViewerPage() {
 
   useEffect(() => {
     if (!engine || !file) return;
+    clearViewModeStore();
     setLoadingState("parsing");
     engine
       .loadFile(file)
@@ -89,7 +95,7 @@ export default function ViewerPage() {
         console.error("IFC load failed:", err);
         setLoadingState("error");
       });
-  }, [engine, file, setLoadingState]);
+  }, [engine, file, setLoadingState, clearViewModeStore]);
 
   useEffect(() => {
     if (!engine) return;
@@ -125,18 +131,19 @@ export default function ViewerPage() {
     setViewerTool("none");
   }, [setViewerTool]);
 
-  const handleViewPreset = useCallback(
-    (preset: ViewSectionPresetId) => {
-      engine?.applyViewPreset(preset);
-      setViewerTool("none");
+  const handleApplyViewMode = useCallback(
+    (mode: ViewModeId) => {
+      if (!engine) return;
+      const ok = engine.applyViewMode(mode);
+      if (ok) setOrthographicView(mode);
     },
-    [engine, setViewerTool],
+    [engine, setOrthographicView],
   );
 
-  const handleBeginFreeSection = useCallback(() => {
-    engine?.beginFreeSectionPick();
-    setViewerTool("free_section_pick");
-  }, [engine, setViewerTool]);
+  const handleExitViewMode = useCallback(() => {
+    engine?.exitViewMode();
+    clearViewModeStore();
+  }, [engine, clearViewModeStore]);
 
   const filteredAssemblies = useMemo(() => {
     const list = analyzerData?.assemblies ?? [];
@@ -419,11 +426,15 @@ export default function ViewerPage() {
         onMeasurementToggle={toggleMeasurementTool}
         onMeasurementClear={() => engine?.clearMeasurements()}
         onMeasurementFinish={finishMeasurementTool}
-        onViewPreset={handleViewPreset}
-        onBeginFreeSection={handleBeginFreeSection}
+        onApplyViewMode={handleApplyViewMode}
+        viewModeDisabled={
+          viewerTool === "measurement" || loadingState !== "ready"
+        }
       />
 
-      <ViewSectionControls engine={engine} />
+      {viewMode !== "none" && (
+        <ViewModeActiveBar viewMode={viewMode} onExit={handleExitViewMode} />
+      )}
 
       {viewerTool === "measurement" && <SmartMeasurementCard />}
 
