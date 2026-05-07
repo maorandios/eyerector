@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@thatopen/components": "^3.4.5",
+    "@thatopen/components-front": "^3.4.3",
     "@thatopen/fragments": "^3.4.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

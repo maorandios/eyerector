@@ -2,10 +2,12 @@
 
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
+import * as OBF from "@thatopen/components-front";
 import CameraControls from "camera-controls";
 import { LodMode } from "@thatopen/fragments";
 import type { ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
+import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
 import {
   SELECTION_HIGHLIGHT_COLOR,
   applyEyeSteelRendererDefaults,
@@ -17,6 +19,8 @@ interface PickHit {
   localId: number;
   itemId: number;
 }
+
+export type ViewerToolMode = "none" | "measurement";
 
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
@@ -34,19 +38,25 @@ export class ViewerEngine {
   private downPos: { x: number; y: number; t: number } | null = null;
   private pickCallback: ((hit: PickHit) => void) | null = null;
   private fragmentCameraHooksInstalled = false;
+  private readonly measurementController: MeasurementController;
+  private viewerTool: ViewerToolMode = "none";
 
   constructor(container: HTMLDivElement) {
     this.container = container;
     this.components = new OBC.Components();
+    this.measurementController = new MeasurementController(this.components);
     this.setupWorld();
   }
 
   private setupWorld() {
     const worlds = this.components.get(OBC.Worlds);
-    this.world = worlds.create<OBC.SimpleScene, OBC.SimpleCamera, OBC.SimpleRenderer>();
+    this.world = worlds.create<OBC.SimpleScene, OBC.SimpleCamera, OBF.RendererWith2D>();
     this.world.scene = new OBC.SimpleScene(this.components);
-    this.world.renderer = new OBC.SimpleRenderer(this.components, this.container);
+    this.world.renderer = new OBF.RendererWith2D(this.components, this.container);
     this.world.camera = new OBC.SimpleCamera(this.components);
+
+    const rw = this.world.renderer as OBF.RendererWith2D;
+    rw.showLogo = false;
 
     this.components.init();
     (this.world.scene as OBC.SimpleScene).setup();
@@ -56,13 +66,33 @@ export class ViewerEngine {
     this.installFragmentCameraSyncOnce();
     this.installOrbitPivotOnRotateStart();
 
+    this.measurementController.attach(this.world);
+
     const scene = this.world.scene.three as THREE.Scene;
     applyEyeSteelSceneBackdrop(scene);
     this.viewerLights.push(...createEyeSteelLights(scene));
 
-    const renderer = this.world.renderer as OBC.SimpleRenderer;
+    const renderer = this.world.renderer as OBF.RendererWith2D;
+    const syncCss2dOverlay = () => {
+      const el = renderer.container;
+      if (el.clientWidth > 0 && el.clientHeight > 0) {
+        renderer.three2D.setSize(el.clientWidth, el.clientHeight);
+      }
+    };
     applyEyeSteelRendererDefaults(renderer.three);
-    renderer.onResize.add(() => applyEyeSteelRendererDefaults(renderer.three));
+    syncCss2dOverlay();
+    renderer.onResize.add(() => {
+      applyEyeSteelRendererDefaults(renderer.three);
+      syncCss2dOverlay();
+    });
+
+    renderer.onBeforeUpdate.add(() => {
+      if (!this.disposed) this.measurementController.suppressVertexPickerMarker();
+    });
+
+    renderer.onAfterUpdate.add(() => {
+      if (!this.disposed) this.measurementController.syncHtmlLabels();
+    });
 
     this.installPointerListeners();
   }
@@ -164,6 +194,7 @@ export class ViewerEngine {
 
   async loadFile(file: File) {
     if (this.disposed) return;
+    this.measurementController.clearAll();
     const { model } = await loadIfcModel(this.components, file);
     const casted = model as {
       modelId: string;
@@ -201,6 +232,26 @@ export class ViewerEngine {
 
   setPickCallback(cb: ((hit: PickHit) => void) | null) {
     this.pickCallback = cb;
+  }
+
+  /** Exclusive tool modes: measurement disables IFC element picking on tap. */
+  setViewerTool(tool: ViewerToolMode) {
+    if (this.disposed) return;
+    this.viewerTool = tool;
+    if (tool === "measurement") {
+      this.measurementController.activate();
+    } else {
+      this.measurementController.deactivate();
+    }
+  }
+
+  getViewerTool(): ViewerToolMode {
+    return this.viewerTool;
+  }
+
+  clearMeasurements() {
+    if (this.disposed) return;
+    this.measurementController.clearAll();
   }
 
   private installPointerListeners() {
@@ -243,6 +294,11 @@ export class ViewerEngine {
       if (rect.width === 0 || rect.height === 0) return;
       const useX = event.clientX || start.x;
       const useY = event.clientY || start.y;
+
+      if (this.viewerTool === "measurement") {
+        void this.measurementController.tapCommit();
+        return;
+      }
 
       if (!this.pickCallback) return;
 
@@ -408,6 +464,8 @@ export class ViewerEngine {
     if (this.disposed) return;
     this.disposed = true;
     try {
+      this.viewerTool = "none";
+      this.measurementController.shutdown();
       for (const light of this.viewerLights) {
         this.world.scene.three.remove(light);
         light.dispose();

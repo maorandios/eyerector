@@ -1,6 +1,6 @@
 "use client";
 
-import { Search, Layers3, RotateCcw, ScanSearch } from "lucide-react";
+import { Ruler, Search, Layers3, RotateCcw, ScanSearch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { he } from "@/lib/i18n/he";
 
@@ -9,6 +9,8 @@ interface Props {
   onLayers: () => void;
   onResetView: () => void;
   onFitAll: () => void;
+  measurementActive?: boolean;
+  onMeasurementToggle?: () => void;
 }
 
 export function FloatingActions({
@@ -16,9 +18,23 @@ export function FloatingActions({
   onLayers,
   onResetView,
   onFitAll,
+  measurementActive = false,
+  onMeasurementToggle,
 }: Props) {
   return (
     <div className="absolute bottom-24 left-3 z-20 flex flex-col gap-2">
+      <Button
+        type="button"
+        size="lg"
+        variant={measurementActive ? "default" : "secondary"}
+        className="min-h-14 gap-2 px-4 text-base font-semibold shadow-lg"
+        onClick={onMeasurementToggle}
+        aria-label="מדידה"
+        aria-pressed={measurementActive}
+      >
+        <Ruler size={22} />
+        מדידה
+      </Button>
       <Button size="icon" variant="secondary" onClick={onSearch} aria-label={he.search}>
         <Search size={20} />
       </Button>

@@ -5,12 +5,14 @@ import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { TopBar } from "@/components/viewer/TopBar";
 import { BottomModeNav } from "@/components/viewer/BottomModeNav";
+import { MeasurementToolBar } from "@/components/viewer/MeasurementToolBar";
 import { FloatingActions } from "@/components/viewer/actions/FloatingActions";
 import { BottomSheet } from "@/components/sheets/BottomSheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
+import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
 import { he } from "@/lib/i18n/he";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
@@ -64,6 +66,18 @@ export default function ViewerPage() {
     setTransparencyEnabled,
   } = useAppStore();
 
+  const viewerTool = useViewerToolStore((s) => s.activeTool);
+  const setViewerTool = useViewerToolStore((s) => s.setActiveTool);
+
+  useEffect(() => {
+    if (!engine) return;
+    engine.setViewerTool(viewerTool);
+  }, [engine, viewerTool]);
+
+  useEffect(() => {
+    if (!file) setViewerTool("none");
+  }, [file, setViewerTool]);
+
   useEffect(() => {
     if (!file) router.replace("/");
   }, [file, router]);
@@ -99,6 +113,14 @@ export default function ViewerPage() {
 
   const onReady = useCallback((instance: ViewerEngine | null) => setEngine(instance), []);
   const modeLabel = modeConfig[mode].label;
+
+  const toggleMeasurementTool = useCallback(() => {
+    setViewerTool(viewerTool === "measurement" ? "none" : "measurement");
+  }, [viewerTool, setViewerTool]);
+
+  const finishMeasurementTool = useCallback(() => {
+    setViewerTool("none");
+  }, [setViewerTool]);
 
   const filteredAssemblies = useMemo(() => {
     const list = analyzerData?.assemblies ?? [];
@@ -383,7 +405,15 @@ export default function ViewerPage() {
         onLayers={() => setActiveSheet("layers")}
         onResetView={() => engine?.resetView()}
         onFitAll={() => engine?.fitAll()}
+        measurementActive={viewerTool === "measurement"}
+        onMeasurementToggle={toggleMeasurementTool}
       />
+      {viewerTool === "measurement" && (
+        <MeasurementToolBar
+          onFinish={finishMeasurementTool}
+          onClear={() => engine?.clearMeasurements()}
+        />
+      )}
       <BottomModeNav mode={mode} onModeChange={setMode} />
 
       <BottomSheet open={activeSheet === "search" || activeSheet === "layers"} title="כלים">
