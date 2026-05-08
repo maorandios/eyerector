@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { CONTEXT_GHOST_SNAPSHOT_NAME } from "@/lib/viewer/visual-policy";
 
 export const SKETCH_EDGE_CHILD_NAME = "eyeSteel-sketch-edges";
 
@@ -23,6 +24,106 @@ export function restoreSelectionTintOnSketchLineSegments(root: THREE.Object3D): 
   });
 }
 const SKETCH_INSTANCED_ONBEFORE_PREV = "eyeSteelSketchInstancedEdgeOnBeforePrev";
+
+const CONTEXT_EDGE_OPACITY_STASH = "eyeSteelContextEdgeOpacityStash";
+
+/** While "הצג בהקשר" is active, LOD wire overlays use this `lodOpacity` each frame. */
+let activeContextSketchEdgeOpacity: number | null = null;
+
+/**
+ * "הצג בהקשר": match sketch edge lines (LineBasic + LOD wire) to ghost face opacity.
+ * Pass `null` to restore stashed values (pool + LineSegments on `root`).
+ */
+export function setContextIsolationEdgeOpacity(
+  opacity: number | null,
+  root: THREE.Object3D | null,
+  pool: Map<number, THREE.LineBasicMaterial> | null,
+): void {
+  activeContextSketchEdgeOpacity = opacity;
+
+  if (opacity == null) {
+    if (pool) {
+      for (const m of pool.values()) {
+        restoreLineMaterialContextOpacity(m);
+      }
+    }
+    if (root) {
+      root.traverse((obj) => {
+        for (const ch of obj.children) {
+          if (ch.name !== SKETCH_EDGE_CHILD_NAME) continue;
+          const ls = ch as THREE.LineSegments;
+          const mats = ls.material;
+          if (Array.isArray(mats)) {
+            for (const m of mats) {
+              if (m instanceof THREE.LineBasicMaterial) restoreLineMaterialContextOpacity(m);
+            }
+          } else if (mats instanceof THREE.LineBasicMaterial) {
+            restoreLineMaterialContextOpacity(mats);
+          }
+        }
+      });
+    }
+    return;
+  }
+
+  const apply = (m: THREE.LineBasicMaterial): void => {
+    const ud = m.userData as Record<string, unknown>;
+    if (!(CONTEXT_EDGE_OPACITY_STASH in ud)) {
+      ud[CONTEXT_EDGE_OPACITY_STASH] = {
+        opacity: m.opacity,
+        transparent: m.transparent,
+        depthWrite: m.depthWrite,
+      };
+    }
+    m.transparent = true;
+    m.opacity = opacity;
+    m.depthWrite = false;
+    m.needsUpdate = true;
+  };
+
+  if (pool) {
+    for (const m of pool.values()) apply(m);
+  }
+  if (root) {
+    root.traverse((obj) => {
+      for (const ch of obj.children) {
+        if (ch.name !== SKETCH_EDGE_CHILD_NAME) continue;
+        const ls = ch as THREE.LineSegments;
+        const mats = ls.material;
+        if (Array.isArray(mats)) {
+          for (const m of mats) {
+            if (m instanceof THREE.LineBasicMaterial) apply(m);
+          }
+        } else if (mats instanceof THREE.LineBasicMaterial) {
+          apply(mats);
+        }
+      }
+    });
+  }
+}
+
+function restoreLineMaterialContextOpacity(m: THREE.LineBasicMaterial): void {
+  const ud = m.userData as Record<string, unknown>;
+  const st = ud[CONTEXT_EDGE_OPACITY_STASH] as
+    | { opacity: number; transparent: boolean; depthWrite: boolean }
+    | undefined;
+  if (!st) return;
+  m.opacity = st.opacity;
+  m.transparent = st.transparent;
+  m.depthWrite = st.depthWrite;
+  delete ud[CONTEXT_EDGE_OPACITY_STASH];
+  m.needsUpdate = true;
+}
+
+function applyContextSketchWireLodOpacity(wireMat: THREE.Material): void {
+  if (!isLodFragmentMaterial(wireMat)) return;
+  const m = wireMat as LodLikeMaterial;
+  if (activeContextSketchEdgeOpacity != null) {
+    m.lodOpacity = activeContextSketchEdgeOpacity;
+  } else {
+    m.lodOpacity = 1;
+  }
+}
 
 /** IFC / fragment face tint → edge line: same hue, linear darken (see {@link edgeLineColorFromFace}). */
 const EDGE_LINE_DARKEN = 0.48;
@@ -284,9 +385,13 @@ function attachInstancedSketchWireframe(im: THREE.InstancedMesh): void {
 
     if (Array.isArray(sm) && Array.isArray(wm)) {
       const n = Math.min(sm.length, wm.length);
-      for (let i = 0; i < n; i++) syncLodSketchWireframeFromSource(wm[i], sm[i]);
+      for (let i = 0; i < n; i++) {
+        syncLodSketchWireframeFromSource(wm[i], sm[i]);
+        applyContextSketchWireLodOpacity(wm[i]);
+      }
     } else if (!Array.isArray(sm) && !Array.isArray(wm)) {
       syncLodSketchWireframeFromSource(wm, sm);
+      applyContextSketchWireLodOpacity(wm);
     }
 
     wireIm.boundingSphere = null;
@@ -311,6 +416,7 @@ export function ensureSketchEdgesAttached(
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
     if (!mesh.isMesh) return;
+    if (mesh.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
     const geom = mesh.geometry as THREE.BufferGeometry | undefined;
     if (!geom?.attributes.position || geom.getAttribute("position").count < 3) return;
     if (!mesh.material) return;
@@ -339,6 +445,7 @@ export function attachSketchEdges(
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
     if (!mesh.isMesh) return;
+    if (mesh.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
 
     if (mesh.isInstancedMesh) {
       attachInstancedSketchWireframe(mesh);

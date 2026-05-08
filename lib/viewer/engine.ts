@@ -10,6 +10,8 @@ import { loadIfcModel } from "@/lib/viewer/ifc-loader";
 import { normalizeIfcGuidKey } from "@/lib/viewer/ifc-guid";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
 import {
+  CONTEXT_GHOST_FACE_OPACITY,
+  CONTEXT_GHOST_SNAPSHOT_NAME,
   EYE_STEEL_SCENE_BACKGROUND_HEX,
   applyEyeSteelRendererDefaults,
   applyEyeSteelSceneBackdrop,
@@ -22,6 +24,7 @@ import {
   ensureSketchEdgesAttached,
   isLodFragmentMaterial,
   restoreSelectionTintOnSketchLineSegments,
+  setContextIsolationEdgeOpacity,
   setSketchEdgeVisibility,
   stripSketchEdgeChildren,
 } from "@/lib/viewer/sketch-mode";
@@ -56,11 +59,6 @@ const ORTHO_DISTANCE_K = 1.75;
 
 /** Worker batch size for `setVisible` / `setOpacity` on large Tekla models (mobile-safe). */
 const ISOLATION_WORKER_CHUNK = 384;
-
-/** Non-selected opacity in context isolation (ghost geometry). */
-const CONTEXT_ISOLATION_GHOST_OPACITY = 0.09;
-
-const CONTEXT_GHOST_SNAPSHOT_NAME = "eyeSteel-context-ghost-snapshot";
 
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
@@ -585,6 +583,7 @@ export class ViewerEngine {
     this.modelObject.traverse((obj) => {
       const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
       if (!mesh.isMesh) return;
+      if (mesh.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
       const geom = mesh.geometry as THREE.BufferGeometry | undefined;
       if (!geom?.attributes.position || geom.getAttribute("position").count < 3) return;
       if (!mesh.material) return;
@@ -614,6 +613,7 @@ export class ViewerEngine {
     this.modelObject.traverse((obj) => {
       const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
       if (!mesh.isMesh) return;
+      if (mesh.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
       const geom = mesh.geometry as THREE.BufferGeometry | undefined;
       if (!geom?.attributes.position || geom.getAttribute("position").count < 3) return;
       if (!mesh.material) return;
@@ -1396,6 +1396,11 @@ export class ViewerEngine {
   }
 
   private clearContextMainThreadVisuals(): void {
+    setContextIsolationEdgeOpacity(
+      null,
+      this.modelObject,
+      this.sketchEdgeMaterialPool,
+    );
     for (const mesh of this.contextOverlayMeshes) {
       mesh.parent?.remove(mesh);
       const material = mesh.material;
@@ -1410,14 +1415,37 @@ export class ViewerEngine {
 
   }
 
-  private makeContextGhostMaterial(): THREE.Material {
+  private extractFragmentDisplayColor(mesh: THREE.Mesh): THREE.Color {
+    const mats = mesh.material;
+    const m0 = Array.isArray(mats) ? mats[0] : mats;
+    if (!m0) return new THREE.Color(0x8f98a3);
+    if (isLodFragmentMaterial(m0)) {
+      return (m0 as THREE.ShaderMaterial & { lodColor: THREE.Color }).lodColor.clone();
+    }
+    if (
+      m0 instanceof THREE.MeshStandardMaterial ||
+      m0 instanceof THREE.MeshLambertMaterial ||
+      m0 instanceof THREE.MeshPhongMaterial
+    ) {
+      return m0.color.clone();
+    }
+    const c = (m0 as { color?: THREE.Color }).color;
+    if (c instanceof THREE.Color) return c.clone();
+    return new THREE.Color(0x8f98a3);
+  }
+
+  /** Semi-transparent context overlay: same IFC hue as the source tile, ~15% opacity (see visual-policy). */
+  private makeContextGhostMaterialForMesh(mesh: THREE.Mesh): THREE.MeshBasicMaterial {
     return new THREE.MeshBasicMaterial({
-      color: 0x8f98a3,
-      opacity: Math.max(CONTEXT_ISOLATION_GHOST_OPACITY, 0.16),
+      color: this.extractFragmentDisplayColor(mesh),
+      opacity: CONTEXT_GHOST_FACE_OPACITY,
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide,
       toneMapped: false,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
   }
 
@@ -1425,9 +1453,33 @@ export class ViewerEngine {
     if (!this.modelObject) return 0;
     let meshCount = 0;
     this.modelObject.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
+      const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
       if (!mesh.isMesh || !mesh.material) return;
-      const ghostMaterial = this.makeContextGhostMaterial();
+      if (mesh.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
+
+      const ghostMaterial = this.makeContextGhostMaterialForMesh(mesh);
+
+      if (mesh.isInstancedMesh) {
+        const im = mesh;
+        if (im.count <= 0) return;
+        const ghost = new THREE.InstancedMesh(im.geometry, ghostMaterial, im.count);
+        ghost.name = CONTEXT_GHOST_SNAPSHOT_NAME;
+        ghost.renderOrder = -10;
+        ghost.matrixAutoUpdate = im.matrixAutoUpdate;
+        ghost.position.copy(im.position);
+        ghost.quaternion.copy(im.quaternion);
+        ghost.scale.copy(im.scale);
+        ghost.matrix.copy(im.matrix);
+        ghost.matrixWorld.copy(im.matrixWorld);
+        ghost.frustumCulled = im.frustumCulled;
+        ghost.instanceMatrix.copy(im.instanceMatrix);
+        ghost.instanceMatrix.needsUpdate = true;
+        im.parent?.add(ghost);
+        this.contextOverlayMeshes.push(ghost);
+        meshCount++;
+        return;
+      }
+
       const ghost = new THREE.Mesh(mesh.geometry, ghostMaterial);
       ghost.name = CONTEXT_GHOST_SNAPSHOT_NAME;
       ghost.renderOrder = -10;
@@ -1626,6 +1678,11 @@ export class ViewerEngine {
     await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
     await this.syncFragmentsViewForced(fragments);
     this.isolationVisualMode = "context";
+    setContextIsolationEdgeOpacity(
+      CONTEXT_GHOST_FACE_OPACITY,
+      this.modelObject,
+      this.sketchEdgeMaterialPool,
+    );
     if (doFocus) {
       await this.focusBboxMap(map);
     }

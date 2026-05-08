@@ -52,6 +52,12 @@ export function applyEyeSteelSceneBackdrop(sceneRoot: THREE.Object3D): void {
 /** Solid highlight fill on fragments (ThatOpen worker tint). */
 export const SELECTION_HIGHLIGHT_COLOR = new THREE.Color(0x2542ff);
 
+/** Main-thread context overlay clones in "הצג בהקשר" — must match {@link ViewerEngine} snapshot name; sketch edges skip these. */
+export const CONTEXT_GHOST_SNAPSHOT_NAME = "eyeSteel-context-ghost-snapshot";
+
+/** Context (non-isolated) faces: show original tint at this opacity so solids read, not outline-only. */
+export const CONTEXT_GHOST_FACE_OPACITY = 0.15;
+
 /**
  * Slight luma lift + translucency reads as a soft glow against the shaded model without extra passes.
  */
