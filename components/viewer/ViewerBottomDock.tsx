@@ -32,6 +32,9 @@ interface Props {
   sketchDisabled?: boolean;
   clippingDisabled?: boolean;
   onPickClippingDirection: (direction: ClippingDirectionId) => void;
+  multiSelectActive?: boolean;
+  multiSelectEnterDisabled?: boolean;
+  onMultiSelectEnter?: () => void;
 }
 
 /**
@@ -52,6 +55,9 @@ export function ViewerBottomDock({
   sketchDisabled = false,
   clippingDisabled = false,
   onPickClippingDirection,
+  multiSelectActive = false,
+  multiSelectEnterDisabled = false,
+  onMultiSelectEnter,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -232,6 +238,21 @@ export function ViewerBottomDock({
           onClick={onSketchToggle}
         >
           מצב סקיצה
+        </Button>
+
+        <Button
+          type="button"
+          variant={multiSelectActive ? "default" : "secondary"}
+          className={cn(
+            "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
+            multiSelectActive && "ring-2 ring-sky-400/80 ring-offset-2 ring-offset-zinc-950",
+          )}
+          aria-pressed={multiSelectActive}
+          disabled={multiSelectEnterDisabled || measurementActive}
+          title={measurementActive ? "צא ממדידה כדי להפעיל בחירה מרובה" : undefined}
+          onClick={() => onMultiSelectEnter?.()}
+        >
+          בחירה מרובה
         </Button>
 
         <Button

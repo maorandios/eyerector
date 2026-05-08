@@ -11,16 +11,17 @@ import { normalizeIfcGuidKey } from "@/lib/viewer/ifc-guid";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
 import {
   EYE_STEEL_SCENE_BACKGROUND_HEX,
-  SELECTION_HIGHLIGHT_COLOR,
   applyEyeSteelRendererDefaults,
   applyEyeSteelSceneBackdrop,
+  buildSelectionHighlightMaterial,
   createEyeSteelLights,
 } from "@/lib/viewer/visual-policy";
 import {
   attachSketchEdges,
   createSketchFillMaterial,
-  createSketchLineMaterial,
+  ensureSketchEdgesAttached,
   isLodFragmentMaterial,
+  restoreSelectionTintOnSketchLineSegments,
   setSketchEdgeVisibility,
   stripSketchEdgeChildren,
 } from "@/lib/viewer/sketch-mode";
@@ -115,12 +116,13 @@ export class ViewerEngine {
   private sketchModeEnabled = false;
   private sketchEdgesBuilt = false;
   private sketchFillMaterial: THREE.MeshBasicMaterial | null = null;
-  private sketchLineMaterial: THREE.LineBasicMaterial | null = null;
+  /** Key = edge line color hex (darkened IFC face); reused so palette-sized models don’t allocate one material per mesh. */
+  private readonly sketchEdgeMaterialPool = new Map<number, THREE.LineBasicMaterial>();
   private readonly sketchMaterialBackup = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
   /** Fragments {@link LodMaterial} instances — restore `lodOpacity` when exiting sketch. */
   private readonly sketchLodOpacityBackup = new Map<THREE.Material, number>();
   private readonly sceneBackdropDefault = new THREE.Color(EYE_STEEL_SCENE_BACKGROUND_HEX);
-  /** Tiles mount asynchronously after load — rebuild sketch cache when meshes appear. */
+  /** Unsubscribes fragment `onViewUpdated` + `tiles.onItemSet` sketch edge sync. */
   private sketchTilesUnsub: (() => void) | null = null;
 
   /**
@@ -558,6 +560,11 @@ export class ViewerEngine {
     });
   }
 
+  private disposeSketchEdgeMaterialPool() {
+    for (const m of this.sketchEdgeMaterialPool.values()) m.dispose();
+    this.sketchEdgeMaterialPool.clear();
+  }
+
   /**
    * Cached outlines once per {@link loadFile}. IFC fragments render via {@link LodMaterial};
    * we hide faces with `lodOpacity = 0` (replacing `mesh.material` is overwritten by the worker).
@@ -566,18 +573,14 @@ export class ViewerEngine {
     if (this.disposed || !this.modelObject) return;
 
     stripSketchEdgeChildren(this.modelObject);
+    this.disposeSketchEdgeMaterialPool();
     this.sketchMaterialBackup.clear();
     this.sketchLodOpacityBackup.clear();
     if (this.sketchFillMaterial) {
       this.sketchFillMaterial.dispose();
       this.sketchFillMaterial = null;
     }
-    if (this.sketchLineMaterial) {
-      this.sketchLineMaterial.dispose();
-      this.sketchLineMaterial = null;
-    }
     this.sketchFillMaterial = createSketchFillMaterial();
-    this.sketchLineMaterial = createSketchLineMaterial();
 
     this.modelObject.traverse((obj) => {
       const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
@@ -588,7 +591,9 @@ export class ViewerEngine {
       this.sketchMaterialBackup.set(mesh, mesh.material);
     });
 
-    attachSketchEdges(this.modelObject, this.sketchLineMaterial);
+    attachSketchEdges(this.modelObject, this.sketchEdgeMaterialPool);
+    /** Per-element darker edge strokes; visibility on for both sketch and default shaded view. */
+    setSketchEdgeVisibility(this.modelObject, true);
     const hadMeshes = this.sketchMaterialBackup.size > 0;
     this.sketchEdgesBuilt = hadMeshes;
 
@@ -598,42 +603,81 @@ export class ViewerEngine {
     }
   }
 
+  /**
+   * Fragment tiles keep mounting after load (`tiles.onItemSet` / `onViewUpdated`). Merge materials,
+   * attach missing edge geometry, and keep outlines visible.
+   */
+  private syncSketchEdgesForNewTiles(): void {
+    if (this.disposed || !this.modelObject) return;
+
+    let newInBackup = false;
+    this.modelObject.traverse((obj) => {
+      const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
+      if (!mesh.isMesh) return;
+      const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+      if (!geom?.attributes.position || geom.getAttribute("position").count < 3) return;
+      if (!mesh.material) return;
+      if (!this.sketchMaterialBackup.has(mesh)) {
+        this.sketchMaterialBackup.set(mesh, mesh.material);
+        newInBackup = true;
+      }
+    });
+
+    const newEdges = ensureSketchEdgesAttached(this.modelObject, this.sketchEdgeMaterialPool);
+
+    if (this.sketchMaterialBackup.size === 0) return;
+
+    setSketchEdgeVisibility(this.modelObject, true);
+
+    const firstTimeReady = !this.sketchEdgesBuilt;
+    const visualsDirty = firstTimeReady || newInBackup || newEdges > 0;
+    if (firstTimeReady) {
+      this.sketchEdgesBuilt = true;
+    }
+    if (visualsDirty) {
+      this.applySketchModeVisuals(this.sketchModeEnabled);
+    }
+  }
+
   private detachSketchTilesListener() {
     this.sketchTilesUnsub?.();
     this.sketchTilesUnsub = null;
   }
 
   /**
-   * Fragment tiles are pushed onto `model.object` asynchronously (`tiles.onItemSet`).
-   * Without this, the first sketch rebuild sees zero meshes and sketch mode never activates.
+   * Tiles stream onto `model.object` after load. Sync sketch edges on every view pass **and** on
+   * each tile mount so outlines are not dropped when `onViewUpdated` alone misses batches.
    */
   private attachSketchRebuildWhenTilesReady(fragModel: FragmentsModel) {
     this.detachSketchTilesListener();
 
-    let attempts = 0;
-    const onViewUpdated = () => {
-      if (this.disposed || attempts++ > 80) {
-        fragModel.onViewUpdated.remove(onViewUpdated);
-        this.sketchTilesUnsub = null;
+    let onViewUpdated: () => void;
+    let onTileSet: () => void;
+
+    const cleanup = () => {
+      fragModel.onViewUpdated.remove(onViewUpdated);
+      fragModel.tiles.onItemSet.remove(onTileSet);
+      this.sketchTilesUnsub = null;
+    };
+
+    onViewUpdated = () => {
+      if (this.disposed) {
+        cleanup();
         return;
       }
-      if (this.sketchEdgesBuilt) {
-        fragModel.onViewUpdated.remove(onViewUpdated);
-        this.sketchTilesUnsub = null;
-        return;
-      }
-      this.rebuildSketchModeCache();
-      if (this.sketchEdgesBuilt) {
-        fragModel.onViewUpdated.remove(onViewUpdated);
-        this.sketchTilesUnsub = null;
-      }
+      this.syncSketchEdgesForNewTiles();
+    };
+
+    onTileSet = () => {
+      if (this.disposed) return;
+      queueMicrotask(() => {
+        if (!this.disposed) this.syncSketchEdgesForNewTiles();
+      });
     };
 
     fragModel.onViewUpdated.add(onViewUpdated);
-    this.sketchTilesUnsub = () => {
-      fragModel.onViewUpdated.remove(onViewUpdated);
-      this.sketchTilesUnsub = null;
-    };
+    fragModel.tiles.onItemSet.add(onTileSet);
+    this.sketchTilesUnsub = cleanup;
   }
 
   private applySketchModeVisuals(enabled: boolean): void {
@@ -679,14 +723,15 @@ export class ViewerEngine {
         if (!origList.every(isLodFragmentMaterial)) mesh.material = orig;
       });
 
-      setSketchEdgeVisibility(this.modelObject, false);
+      /** CAD edges stay on for default shaded view (same geometry as sketch mode; zero extra load). */
+      setSketchEdgeVisibility(this.modelObject, true);
     }
 
     const fragments = this.components.get(OBC.FragmentsManager);
     if (fragments.initialized) void fragments.core.update(true);
   }
 
-  /** Transparent solids + cached dark-gray edges; backdrop and lights unchanged. */
+  /** Sketch: transparent LOD faces + element-colored edges (face ×0.48). Default: solid shading + same edges. */
   setSketchMode(enabled: boolean): void {
     if (this.disposed) return;
     if (this.sketchModeEnabled === enabled) return;
@@ -807,10 +852,7 @@ export class ViewerEngine {
         this.sketchFillMaterial.dispose();
         this.sketchFillMaterial = null;
       }
-      if (this.sketchLineMaterial) {
-        this.sketchLineMaterial.dispose();
-        this.sketchLineMaterial = null;
-      }
+      this.disposeSketchEdgeMaterialPool();
       this.sketchEdgesBuilt = false;
       this.world.scene.three.remove(this.modelObject);
     }
@@ -829,7 +871,6 @@ export class ViewerEngine {
     const fragModel = fragments.list.get(casted.modelId);
     if (fragModel) {
       await fragModel.setLodMode(LodMode.ALL_VISIBLE);
-      this.attachSketchRebuildWhenTilesReady(fragModel);
     }
 
     this.applyPerspectiveClipPlanes(casted.object);
@@ -837,6 +878,16 @@ export class ViewerEngine {
     this.tuneReadableSteelMaterials(casted.object);
 
     this.rebuildSketchModeCache();
+
+    if (fragModel) {
+      this.attachSketchRebuildWhenTilesReady(fragModel);
+    }
+
+    requestAnimationFrame(() => {
+      if (!this.disposed && this.modelObject) {
+        this.syncSketchEdgesForNewTiles();
+      }
+    });
 
     this.syncFragmentsClippingPlanesBridge();
     this.fitAll();
@@ -1479,12 +1530,16 @@ export class ViewerEngine {
   }
 
   private highlightMaterialParams() {
-    return {
-      color: SELECTION_HIGHLIGHT_COLOR.clone(),
-      opacity: 1,
-      transparent: false,
-      renderedFaces: 0,
-    } as const;
+    return buildSelectionHighlightMaterial();
+  }
+
+  /**
+   * Restore sketch outline materials if a legacy selection tint was applied (LineSegments swap).
+   */
+  private clearSelectionOutlineTint(): void {
+    if (this.modelObject) {
+      restoreSelectionTintOnSketchLineSegments(this.modelObject);
+    }
   }
 
   private async applyHighlightToMap(map: Record<string, Set<number>>): Promise<void> {
@@ -1580,22 +1635,26 @@ export class ViewerEngine {
   /** Reset visibility, opacity overrides, and highlight (ThatOpen worker). */
   clearIsolationVisuals(): Promise<void> {
     return this.enqueueIsolation(async () => {
-      this.clearContextMainThreadVisuals();
-      this.isolationVisualMode = "none";
-      if (this.disposed || !this.modelId) {
-        return;
+      try {
+        this.clearContextMainThreadVisuals();
+        this.isolationVisualMode = "none";
+        if (this.disposed || !this.modelId) {
+          return;
+        }
+        const fragments = this.components.get(OBC.FragmentsManager);
+        if (!fragments.initialized) {
+          return;
+        }
+        const fragModel = fragments.list.get(this.modelId);
+        await fragments.resetHighlight();
+        if (fragModel) {
+          await fragModel.resetVisible();
+        }
+        await this.syncFragmentsViewForced(fragments);
+        await this.deferSyncFragmentsView(fragments);
+      } finally {
+        this.clearSelectionOutlineTint();
       }
-      const fragments = this.components.get(OBC.FragmentsManager);
-      if (!fragments.initialized) {
-        return;
-      }
-      const fragModel = fragments.list.get(this.modelId);
-      await fragments.resetHighlight();
-      if (fragModel) {
-        await fragModel.resetVisible();
-      }
-      await this.syncFragmentsViewForced(fragments);
-      await this.deferSyncFragmentsView(fragments);
     });
   }
 
@@ -1610,6 +1669,7 @@ export class ViewerEngine {
       if (!ids || ids.size === 0) {
         await fragments.resetHighlight();
         await this.syncFragmentsViewForced(fragments);
+        this.clearSelectionOutlineTint();
         return;
       }
 
@@ -1631,10 +1691,36 @@ export class ViewerEngine {
     );
   }
 
+  /**
+   * Highlight an arbitrary set of fragment **local** ids (multi-select). No-op when isolation visuals
+   * are active — user should reset view first. Serialized with isolation/highlight RPCs.
+   */
+  async highlightFragmentLocalSet(ids: Set<number>): Promise<void> {
+    if (!this.modelId) return;
+    return this.enqueueIsolation(async () => {
+      if (this.disposed) return;
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (!fragments.initialized) return;
+      if (this.isolationVisualMode !== "none") return;
+
+      if (ids.size === 0) {
+        await fragments.resetHighlight();
+        await this.syncFragmentsViewForced(fragments);
+        this.clearSelectionOutlineTint();
+        return;
+      }
+
+      await fragments.resetHighlight();
+      await fragments.highlight(this.highlightMaterialParams(), this.bboxMapFromLocalSet(ids));
+      await this.syncFragmentsViewForced(fragments);
+    });
+  }
+
   async clearHighlight() {
     const fragments = this.components.get(OBC.FragmentsManager);
     await fragments.resetHighlight();
     await this.syncFragmentsViewForced(fragments);
+    this.clearSelectionOutlineTint();
   }
 
   async focusAnalyzerSubset(entities: Iterable<{ id: string; expressId: number | null }>) {
@@ -1749,9 +1835,8 @@ export class ViewerEngine {
       }
       this.sketchLodOpacityBackup.clear();
       this.sketchFillMaterial?.dispose();
-      this.sketchLineMaterial?.dispose();
       this.sketchFillMaterial = null;
-      this.sketchLineMaterial = null;
+      this.disposeSketchEdgeMaterialPool();
       this.sketchMaterialBackup.clear();
       this.sketchEdgesBuilt = false;
       (this.world.scene.three as THREE.Scene).background = this.sceneBackdropDefault;

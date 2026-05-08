@@ -10,6 +10,7 @@ import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
 import { ClippingActiveBar } from "@/components/viewer/ClippingActiveBar";
 import { ViewModeActiveBar } from "@/components/viewer/ViewModeActiveBar";
 import { IsolationActionBar } from "@/components/viewer/IsolationActionBar";
+import { MultiSelectActionBar } from "@/components/viewer/MultiSelectActionBar";
 import { Button } from "@/components/ui/button";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
@@ -18,6 +19,7 @@ import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { useViewerViewStore } from "@/lib/state/viewer-view-store";
 import { useIsolationStore } from "@/lib/state/isolation-store";
+import { useMultiSelectStore } from "@/lib/state/multi-select-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
@@ -89,6 +91,8 @@ export default function ViewerPage() {
   const clearViewModeStore = useViewerViewStore((s) => s.clearView);
 
   const isolationMode = useIsolationStore((s) => s.isolationMode);
+  const pickInteractionMode = useMultiSelectStore((s) => s.pickInteractionMode);
+  const multiSelectedCount = useMultiSelectStore((s) => s.selectedLocalIds.length);
 
   const clipSnap = useClippingStore(
     useShallow((s) => ({
@@ -106,6 +110,7 @@ export default function ViewerPage() {
     if (!engine || loadingState !== "ready") {
       useClippingStore.getState().reset();
       useIsolationStore.getState().reset();
+      useMultiSelectStore.getState().reset();
       return;
     }
     useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
@@ -187,8 +192,14 @@ export default function ViewerPage() {
   }, [viewerTool]);
 
   const toggleMeasurementTool = useCallback(() => {
+    if (viewerTool !== "measurement") {
+      if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
+        useMultiSelectStore.getState().exitMultiSelectSession();
+        void engine?.highlightFragmentLocalSet(new Set());
+      }
+    }
     setViewerTool(viewerTool === "measurement" ? "none" : "measurement");
-  }, [viewerTool, setViewerTool]);
+  }, [viewerTool, setViewerTool, engine]);
 
   const finishMeasurementTool = useCallback(() => {
     setViewerTool("none");
@@ -378,10 +389,54 @@ export default function ViewerPage() {
      * Keep show-all as a full visual reset; selection state is still preserved in the store/UI.
      */
     await engine.clearHighlight();
+    useMultiSelectStore.getState().exitMultiSelectSession();
+  }, [engine]);
+
+  const handleEnterMultiSelect = useCallback(() => {
+    if (!engine || viewerTool === "measurement" || isolationMode !== "none") return;
+    useMultiSelectStore.getState().clearSelected();
+    useMultiSelectStore.getState().enterMultiSelect();
+    void engine.highlightFragmentLocalSet(new Set());
+    setSelectionStatus("בחירה מרובה: לחץ על אלמנטים במודל");
+  }, [engine, viewerTool, isolationMode]);
+
+  const handleMultiIsolate = useCallback(async () => {
+    if (!engine) return;
+    const ids = useMultiSelectStore.getState().selectedLocalIds;
+    if (ids.length === 0) return;
+    const ok = await engine.applyIsolation("isolated", new Set(ids), { focus: true });
+    if (ok) {
+      useIsolationStore.getState().setIsolation("isolated", ids);
+      useMultiSelectStore.getState().exitMultiSelectSession();
+    }
+  }, [engine]);
+
+  const handleMultiContext = useCallback(async () => {
+    if (!engine) return;
+    const ids = useMultiSelectStore.getState().selectedLocalIds;
+    if (ids.length === 0) return;
+    const ok = await engine.applyIsolation("context", new Set(ids), { focus: true });
+    if (ok) {
+      useIsolationStore.getState().setIsolation("context", ids);
+      useMultiSelectStore.getState().exitMultiSelectSession();
+    }
+  }, [engine]);
+
+  const handleMultiClear = useCallback(async () => {
+    useMultiSelectStore.getState().clearSelected();
+    await engine?.highlightFragmentLocalSet(new Set());
+    setSelectionStatus("בחירה מרובה: נוקו בחירות");
+  }, [engine]);
+
+  const handleMultiDone = useCallback(async () => {
+    useMultiSelectStore.getState().exitMultiSelectSession();
+    await engine?.highlightFragmentLocalSet(new Set());
+    setSelectionStatus("מצב בחירה רגיל");
   }, [engine]);
 
   const selectAssembly = useCallback(
     async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
+      useMultiSelectStore.getState().exitMultiSelectSession();
       const focusCamera = opts?.focusCamera !== false;
       setProfileGroupDetail(null);
       setAssemblyStructureNotice(false);
@@ -419,6 +474,7 @@ export default function ViewerPage() {
 
   const selectAggregatedAssemblyRow = useCallback(
     async (row: AggregatedAssemblyRow) => {
+      useMultiSelectStore.getState().exitMultiSelectSession();
       setProfileGroupDetail(null);
       setAssemblyDetailOverride(null);
       setAssemblyStructureNotice(false);
@@ -450,6 +506,7 @@ export default function ViewerPage() {
 
   const selectProfileGroupRow = useCallback(
     async (row: AggregatedProfileTabRow) => {
+      useMultiSelectStore.getState().exitMultiSelectSession();
       setProfileGroupDetail({
         profileLabel: row.profileLabel,
         instances: row.instances,
@@ -473,6 +530,7 @@ export default function ViewerPage() {
       part: AnalyzerIndexedEntity | null,
       opts?: { preserveProfileGroup?: boolean; focusCamera?: boolean },
     ) => {
+      useMultiSelectStore.getState().exitMultiSelectSession();
       const focusCamera = opts?.focusCamera !== false;
       if (part !== null && !opts?.preserveProfileGroup) {
         setProfileGroupDetail(null);
@@ -504,6 +562,7 @@ export default function ViewerPage() {
 
   const selectPartInstances = useCallback(
     async (instances: AnalyzerPart[]) => {
+      useMultiSelectStore.getState().exitMultiSelectSession();
       setProfileGroupDetail(null);
       setAssemblyDetailOverride(null);
       setAssemblyStructureNotice(false);
@@ -536,6 +595,75 @@ export default function ViewerPage() {
 
       const pickCtx = await engine.resolvePickMatchContext(hit);
       const guidIdx = engine.getAnalyzerGuidIndex();
+
+      if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
+        const toggleAndHighlight = async (targetIds: number[]) => {
+          const uniq = [...new Set(targetIds)].filter(
+            (n) => typeof n === "number" && Number.isFinite(n),
+          );
+          if (uniq.length === 0) return;
+          useMultiSelectStore.getState().toggleLocalIds(uniq);
+          const sel = useMultiSelectStore.getState().selectedLocalIds;
+          await engine.highlightFragmentLocalSet(new Set(sel));
+          setSelectionStatus(`בחירה מרובה: ${formatCount(sel.length)} אלמנטים`);
+        };
+
+        if (!analyzerData) {
+          await toggleAndHighlight(highlightIds);
+          if (highlightIds.length === 0) {
+            setSelectionStatus("בחירה מרובה: לא נמצאו מזהים (נדרש ניתוח למודל)");
+          }
+          return;
+        }
+
+        if (selectionMode === "assembly" && !hasRealIfcAssemblies) {
+          if (highlightIds.length) await toggleAndHighlight(highlightIds);
+          setAssemblyStructureNotice(true);
+          setAssemblyDetailOverride(null);
+          setSelectedAssemblyId(null);
+          setSelectedPartId(null);
+          setProfileGroupDetail(null);
+          setActiveSheet("details");
+          setSelectionStatus(ASSEMBLY_STRUCTURE_NOTICE_HE);
+          return;
+        }
+
+        if (selectionMode === "assembly" && hasRealIfcAssemblies) {
+          const candidates = analyzerData.assemblies.filter(
+            (a) =>
+              a.expressId != null &&
+              (a.parts.some((p) =>
+                analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+              ) ||
+                (a.bolts ?? []).some((b) =>
+                  analyzerEntityMatchesPick(b, pickCtx.localIds, pickCtx.guids, guidIdx),
+                )),
+          );
+          const assembly = choosePreferredAssemblyForModelPick(candidates);
+          if (assembly) {
+            const set = await engine.resolveIsolationLocalIds(analyzerRefsFromAssembly(assembly));
+            await toggleAndHighlight([...set]);
+            return;
+          }
+        }
+
+        const part = analyzerData.parts.find((p) =>
+          analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+        );
+
+        if (part) {
+          const set = await engine.resolveIsolationLocalIds([{ id: part.id, expressId: part.expressId }]);
+          await toggleAndHighlight([...set]);
+          return;
+        }
+
+        const fallback = [...new Set([...pickCtx.localIds, ...highlightIds])].filter(
+          (n) => typeof n === "number" && Number.isFinite(n),
+        );
+        if (fallback.length) await toggleAndHighlight(fallback);
+        else setSelectionStatus("בחירה מרובה: לא נמצאה התאמה לנקודת המגע");
+        return;
+      }
 
       if (!analyzerData) {
         if (highlightIds.length) await engine.highlightItemIds(highlightIds);
@@ -616,6 +744,7 @@ export default function ViewerPage() {
 
   const clearViewerSelection = useCallback(async () => {
     setAssemblyStructureNotice(false);
+    useMultiSelectStore.getState().exitMultiSelectSession();
     if (engine) {
       await engine.clearIsolationVisuals();
       useIsolationStore.getState().clearIsolation();
@@ -660,12 +789,26 @@ export default function ViewerPage() {
       </div>
 
       <IsolationActionBar
-        visible={isolationRefs.length > 0 && loadingState === "ready"}
+        visible={
+          pickInteractionMode !== "multi" &&
+          (isolationMode !== "none" || isolationRefs.length > 0) &&
+          loadingState === "ready"
+        }
         isolationMode={isolationMode}
         disabled={!engine || viewerTool === "measurement"}
         onIsolate={() => void handleIsolationIsolate()}
         onContext={() => void handleIsolationContext()}
         onShowAll={() => void handleIsolationShowAll()}
+      />
+
+      <MultiSelectActionBar
+        visible={pickInteractionMode === "multi" && loadingState === "ready" && isolationMode === "none"}
+        selectedCount={multiSelectedCount}
+        disabled={!engine || viewerTool === "measurement"}
+        onIsolate={() => void handleMultiIsolate()}
+        onContext={() => void handleMultiContext()}
+        onClear={() => void handleMultiClear()}
+        onDone={() => void handleMultiDone()}
       />
 
       <ViewerBottomDock
@@ -685,6 +828,11 @@ export default function ViewerPage() {
         sketchDisabled={loadingState !== "ready"}
         clippingDisabled={loadingState !== "ready"}
         onPickClippingDirection={handlePickClippingDirection}
+        multiSelectActive={pickInteractionMode === "multi"}
+        multiSelectEnterDisabled={
+          loadingState !== "ready" || isolationMode !== "none" || viewerTool === "measurement"
+        }
+        onMultiSelectEnter={handleEnterMultiSelect}
       />
 
       <ClippingActiveBar

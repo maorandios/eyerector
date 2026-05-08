@@ -4,6 +4,7 @@
  */
 
 import * as THREE from "three";
+import type { MaterialDefinition } from "@thatopen/fragments";
 
 /** Mobile/tablet: cap sharpness cost; desktop allows moderate retina upscale. */
 export function getEyeSteelPixelRatioCap(): number {
@@ -48,5 +49,19 @@ export function applyEyeSteelSceneBackdrop(sceneRoot: THREE.Object3D): void {
   scene.background = new THREE.Color(EYE_STEEL_SCENE_BACKGROUND_HEX);
 }
 
-/** Warm industrial accent for fragment GPU highlight (That Open only draws selection). */
-export const SELECTION_HIGHLIGHT_COLOR = new THREE.Color(0xedae3b);
+/** Solid highlight fill on fragments (ThatOpen worker tint). */
+export const SELECTION_HIGHLIGHT_COLOR = new THREE.Color(0x2542ff);
+
+/**
+ * Slight luma lift + translucency reads as a soft glow against the shaded model without extra passes.
+ */
+export function buildSelectionHighlightMaterial(): MaterialDefinition {
+  const color = SELECTION_HIGHLIGHT_COLOR.clone().lerp(new THREE.Color(0xffffff), 0.1);
+  return {
+    color,
+    opacity: 0.91,
+    transparent: true,
+    depthWrite: true,
+    renderedFaces: 0,
+  };
+}

@@ -1,7 +1,6 @@
 import * as OBC from "@thatopen/components";
-import type { MaterialDefinition } from "@thatopen/fragments";
 
-import { SELECTION_HIGHLIGHT_COLOR } from "@/lib/viewer/visual-policy";
+import { buildSelectionHighlightMaterial } from "@/lib/viewer/visual-policy";
 
 export async function highlightExpressIds(
   components: OBC.Components,
@@ -9,16 +8,7 @@ export async function highlightExpressIds(
   expressIds: number[],
 ) {
   const fragments = components.get(OBC.FragmentsManager);
-  const selectionMaterial: MaterialDefinition = {
-    color: SELECTION_HIGHLIGHT_COLOR.clone(),
-    opacity: 1,
-    transparent: false,
-    renderedFaces: 0,
-  };
-  await fragments.highlight(
-    selectionMaterial,
-    { [modelId]: new Set(expressIds) },
-  );
+  await fragments.highlight(buildSelectionHighlightMaterial(), { [modelId]: new Set(expressIds) });
 }
 
 export async function clearHighlight(components: OBC.Components) {
