@@ -8,6 +8,11 @@ import {
   VIEW_MODE_ORDER,
   type ViewModeId,
 } from "@/lib/viewer/view-mode-presets";
+import {
+  CLIPPING_DIRECTION_ORDER,
+  CLIPPING_LABELS_HE,
+  type ClippingDirectionId,
+} from "@/lib/viewer/clipping-presets";
 import { cn } from "@/lib/utils";
 
 type SelectionMode = "part" | "assembly";
@@ -25,6 +30,8 @@ interface Props {
   sketchModeActive: boolean;
   onSketchToggle: () => void;
   sketchDisabled?: boolean;
+  clippingDisabled?: boolean;
+  onPickClippingDirection: (direction: ClippingDirectionId) => void;
 }
 
 /**
@@ -43,9 +50,12 @@ export function ViewerBottomDock({
   sketchModeActive,
   onSketchToggle,
   sketchDisabled = false,
+  clippingDisabled = false,
+  onPickClippingDirection,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
+  const [clipOpen, setClipOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   const measurementDetailsOpen = useSmartMeasureStore((s) => s.measurementDetailsOpen);
@@ -56,6 +66,7 @@ export function ViewerBottomDock({
       if (!wrapRef.current?.contains(e.target as Node)) {
         setElementOpen(false);
         setViewOpen(false);
+        setClipOpen(false);
       }
     };
     document.addEventListener("pointerdown", onDoc, true);
@@ -78,6 +89,14 @@ export function ViewerBottomDock({
     [onApplyViewMode],
   );
 
+  const pickClippingDirection = useCallback(
+    (dir: ClippingDirectionId) => {
+      onPickClippingDirection(dir);
+      setClipOpen(false);
+    },
+    [onPickClippingDirection],
+  );
+
   return (
     <div
       ref={wrapRef}
@@ -86,7 +105,7 @@ export function ViewerBottomDock({
       <div
         className={cn(
           "pointer-events-auto flex items-center gap-1 rounded-2xl border border-zinc-600 bg-zinc-950/95 px-2 py-2 shadow-2xl backdrop-blur-sm transition-[width] duration-200",
-          measurementActive ? "max-w-[min(100vw-1rem,28rem)]" : "max-w-[min(100vw-1rem,24rem)]",
+          measurementActive ? "max-w-[min(100vw-1rem,30rem)]" : "max-w-[min(100vw-1rem,26rem)]",
         )}
         dir="rtl"
       >
@@ -164,6 +183,37 @@ export function ViewerBottomDock({
                   onClick={() => pickViewMode(id)}
                 >
                   {VIEW_MODE_LABELS_HE[id]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="relative shrink-0">
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-10 gap-1 px-3 text-sm font-semibold disabled:opacity-40"
+            aria-expanded={clipOpen}
+            disabled={clippingDisabled}
+            onClick={() => !clippingDisabled && setClipOpen((o) => !o)}
+          >
+            קליפינג
+            <span className="text-xs opacity-80">{clipOpen ? "▼" : "▲"}</span>
+          </Button>
+          {clipOpen && !clippingDisabled && (
+            <div
+              className="absolute bottom-[calc(100%+6px)] left-1/2 z-50 grid w-[11rem] max-w-[min(11rem,calc(100vw-2rem))] -translate-x-1/2 grid-cols-2 gap-px overflow-hidden rounded-xl border border-zinc-600 bg-zinc-800 p-1 shadow-xl"
+              dir="rtl"
+            >
+              {CLIPPING_DIRECTION_ORDER.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  className="rounded-lg bg-zinc-900 px-3 py-2.5 text-center text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700"
+                  onClick={() => pickClippingDirection(id)}
+                >
+                  {CLIPPING_LABELS_HE[id]}
                 </button>
               ))}
             </div>

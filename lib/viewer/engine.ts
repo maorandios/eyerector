@@ -21,7 +21,7 @@ import {
   createSketchFillMaterial,
   createSketchLineMaterial,
   isLodFragmentMaterial,
-  SKETCH_EDGE_CHILD_NAME,
+  setSketchEdgeVisibility,
   stripSketchEdgeChildren,
 } from "@/lib/viewer/sketch-mode";
 import {
@@ -29,6 +29,12 @@ import {
   eyePositionFromCenter,
   type ViewModeId,
 } from "@/lib/viewer/view-mode-presets";
+import {
+  CLIPPING_LABELS_HE,
+  type ClippingDirectionId,
+  type ViewerClippingUiSnapshot,
+  normalForClippingDirection,
+} from "@/lib/viewer/clipping-presets";
 
 export interface PickHit {
   localId: number;
@@ -87,7 +93,16 @@ export class ViewerEngine {
   private activeOrthoViewMode: ViewModeId | null = null;
   private orthoResizeHandler: (() => void) | null = null;
   private readonly tmpVecEye = new THREE.Vector3();
+  private readonly tmpClipNormal = new THREE.Vector3();
 
+  /** Single user clipping plane (That Open `renderer.setPlane` + fragments bridge). */
+  private readonly userClipPlane = new THREE.Plane();
+  private userClippingActive = false;
+  private userClipDirection: ClippingDirectionId | null = null;
+  private userClipFlipped = false;
+  private userClipDepthOffset = 0;
+  private readonly userClipCenter = new THREE.Vector3();
+  private userClipDiagonal = 1;
   private sketchModeEnabled = false;
   private sketchEdgesBuilt = false;
   private sketchFillMaterial: THREE.MeshBasicMaterial | null = null;
@@ -320,6 +335,56 @@ export class ViewerEngine {
     return true;
   }
 
+  /**
+   * Orthographic camera perpendicular to the active clipping plane, orbit point on the plane
+   * at the current depth (same as מבט for this axis, but pivot follows the section).
+   */
+  applySectionViewFromActiveClipping(): boolean {
+    if (this.disposed || !this.modelObject || !this.userClippingActive || !this.userClipDirection) return false;
+
+    this.applyUserClippingToRenderer();
+
+    const box = new THREE.Box3().setFromObject(this.modelObject);
+    if (box.isEmpty()) return false;
+
+    const size = box.getSize(new THREE.Vector3());
+    const span = Math.max(size.x, size.y, size.z, 1);
+    const distance = ORTHO_DISTANCE_K * span;
+
+    this.updateOrthoFrustum(box);
+
+    const mode = this.userClipDirection;
+    const simpleCam = this.world.camera as OBC.SimpleCamera;
+    const ctrl = simpleCam.controls;
+    const ortho = this.orthographicCamera;
+
+    ortho.up.copy(cameraUpForViewMode(mode));
+
+    simpleCam.three = ortho;
+    if (ctrl) {
+      ctrl.camera = ortho;
+      this.applyOrthographicPlanNavigationBindings(ctrl);
+      ortho.zoom = 1;
+      void ctrl.zoomTo(ortho.zoom, false);
+    }
+
+    const target = new THREE.Vector3();
+    this.userClipPlane.projectPoint(this.userClipCenter, target);
+
+    const eye = this.tmpVecEye.copy(this.userClipPlane.normal).multiplyScalar(-distance).add(target);
+
+    ctrl?.setOrbitPoint(target.x, target.y, target.z);
+    ctrl?.updateCameraUp();
+    ctrl?.setLookAt(eye.x, eye.y, eye.z, target.x, target.y, target.z, false);
+
+    this.boundUseCamera?.(ortho);
+    this.syncFragmentsAfterCameraSwap();
+
+    this.activeOrthoViewMode = mode;
+    this.attachOrthoResizeListener();
+    return true;
+  }
+
   /** Restore perspective camera, fragment projection, and iso frame (same as exiting מבט). */
   exitViewMode(): void {
     if (this.disposed || this.activeOrthoViewMode === null) return;
@@ -476,13 +541,12 @@ export class ViewerEngine {
       this.sketchLineMaterial.dispose();
       this.sketchLineMaterial = null;
     }
-
     this.sketchFillMaterial = createSketchFillMaterial();
     this.sketchLineMaterial = createSketchLineMaterial();
 
     this.modelObject.traverse((obj) => {
       const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
-      if (!mesh.isMesh || mesh.isInstancedMesh) return;
+      if (!mesh.isMesh) return;
       const geom = mesh.geometry as THREE.BufferGeometry | undefined;
       if (!geom?.attributes.position || geom.getAttribute("position").count < 3) return;
       if (!mesh.material) return;
@@ -544,7 +608,7 @@ export class ViewerEngine {
       const fill = this.sketchFillMaterial;
       this.modelObject.traverse((obj) => {
         const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
-        if (!mesh.isMesh || mesh.isInstancedMesh) return;
+        if (!mesh.isMesh) return;
         const orig = this.sketchMaterialBackup.get(mesh);
         if (orig === undefined) return;
 
@@ -564,11 +628,7 @@ export class ViewerEngine {
         }
       });
 
-      this.modelObject.traverse((obj) => {
-        for (const ch of obj.children) {
-          if (ch.name === SKETCH_EDGE_CHILD_NAME) ch.visible = true;
-        }
-      });
+      setSketchEdgeVisibility(this.modelObject, true);
     } else {
       for (const [mat, opacity] of this.sketchLodOpacityBackup) {
         (mat as THREE.Material & { lodOpacity: number }).lodOpacity = opacity;
@@ -577,18 +637,14 @@ export class ViewerEngine {
 
       this.modelObject.traverse((obj) => {
         const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
-        if (!mesh.isMesh || mesh.isInstancedMesh) return;
+        if (!mesh.isMesh) return;
         const orig = this.sketchMaterialBackup.get(mesh);
         if (orig === undefined) return;
         const origList = Array.isArray(orig) ? orig : [orig];
         if (!origList.every(isLodFragmentMaterial)) mesh.material = orig;
       });
 
-      this.modelObject.traverse((obj) => {
-        for (const ch of obj.children) {
-          if (ch.name === SKETCH_EDGE_CHILD_NAME) ch.visible = false;
-        }
-      });
+      setSketchEdgeVisibility(this.modelObject, false);
     }
 
     const fragments = this.components.get(OBC.FragmentsManager);
@@ -614,8 +670,88 @@ export class ViewerEngine {
     this.applySketchModeVisuals(enabled);
   }
 
+  /**
+   * One global clipping plane for IFC fragments (`renderer.setPlane` + worker bridge).
+   * If an orthographic preset (מבט / הצג כחתך) is active, restores perspective so clearing
+   * clipping does not leave the camera in ortho.
+   */
+  clearClipping(): void {
+    if (this.disposed) return;
+    if (this.userClippingActive) {
+      const rw = this.world.renderer as OBF.RendererWith2D;
+      rw.setPlane(false, this.userClipPlane, false);
+      rw.updateClippingPlanes();
+    }
+    this.userClippingActive = false;
+    this.userClipDirection = null;
+    this.userClipFlipped = false;
+    this.userClipDepthOffset = 0;
+    if (this.activeOrthoViewMode !== null) {
+      this.exitViewMode();
+    }
+  }
+
+  enableClippingDirection(direction: ClippingDirectionId): void {
+    if (this.disposed || !this.modelObject) return;
+    const box = new THREE.Box3().setFromObject(this.modelObject);
+    if (box.isEmpty()) return;
+
+    box.getCenter(this.userClipCenter);
+    const size = box.getSize(new THREE.Vector3());
+    this.userClipDiagonal = Math.max(size.length(), 1e-6);
+
+    this.userClipDirection = direction;
+    this.userClipFlipped = false;
+    this.userClipDepthOffset = 0;
+    this.userClippingActive = true;
+    this.applyUserClippingToRenderer();
+  }
+
+  setClippingDepthOffset(offset: number): void {
+    if (this.disposed || !this.userClippingActive) return;
+    const half = this.userClipDiagonal / 2;
+    this.userClipDepthOffset = THREE.MathUtils.clamp(offset, -half, half);
+    this.applyUserClippingToRenderer();
+  }
+
+  flipClipping(): void {
+    if (this.disposed || !this.userClippingActive) return;
+    this.userClipFlipped = !this.userClipFlipped;
+    this.applyUserClippingToRenderer();
+  }
+
+  getClippingUiSnapshot(): ViewerClippingUiSnapshot {
+    const half = this.userClipDiagonal / 2;
+    return {
+      active: this.userClippingActive,
+      direction: this.userClipDirection,
+      labelHe: this.userClipDirection ? CLIPPING_LABELS_HE[this.userClipDirection] : null,
+      depthOffset: this.userClipDepthOffset,
+      depthMin: -half,
+      depthMax: half,
+      flipped: this.userClipFlipped,
+    };
+  }
+
+  private applyUserClippingToRenderer(): void {
+    if (this.disposed || !this.userClippingActive || !this.modelObject || !this.userClipDirection) return;
+
+    const n = normalForClippingDirection(this.userClipDirection, this.tmpClipNormal);
+    if (this.userClipFlipped) n.negate();
+    n.normalize();
+
+    this.userClipPlane.normal.copy(n);
+    // Through center + n*depthOffset along plane normal (world units).
+    this.userClipPlane.constant = -n.dot(this.userClipCenter) - this.userClipDepthOffset;
+
+    const rw = this.world.renderer as OBF.RendererWith2D;
+    rw.setPlane(true, this.userClipPlane, false);
+    rw.updateClippingPlanes();
+  }
+
   async loadFile(file: File) {
     if (this.disposed) return;
+    this.clearClipping();
     this.detachSketchTilesListener();
     if (this.activeOrthoViewMode !== null) this.exitViewMode();
     this.measurementController.clearAll();
@@ -1283,6 +1419,7 @@ export class ViewerEngine {
 
   dispose() {
     if (this.disposed) return;
+    this.clearClipping();
     this.disposed = true;
     this.analyzerGuidKeyToFragmentLocal.clear();
     try {

@@ -1,20 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { CompactModeNav } from "@/components/viewer/CompactModeNav";
 import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
+import { ClippingActiveBar } from "@/components/viewer/ClippingActiveBar";
 import { ViewModeActiveBar } from "@/components/viewer/ViewModeActiveBar";
 import { Button } from "@/components/ui/button";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
+import { useClippingStore } from "@/lib/state/clipping-store";
 import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { useViewerViewStore } from "@/lib/state/viewer-view-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
+import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import { he } from "@/lib/i18n/he";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
 import { isAnalyzerBoltRow } from "@/types/domain";
@@ -81,6 +85,26 @@ export default function ViewerPage() {
   const viewMode = useViewerViewStore((s) => s.viewMode);
   const setOrthographicView = useViewerViewStore((s) => s.setOrthographicView);
   const clearViewModeStore = useViewerViewStore((s) => s.clearView);
+
+  const clipSnap = useClippingStore(
+    useShallow((s) => ({
+      active: s.active,
+      direction: s.direction,
+      labelHe: s.labelHe,
+      depthOffset: s.depthOffset,
+      depthMin: s.depthMin,
+      depthMax: s.depthMax,
+      flipped: s.flipped,
+    })),
+  );
+
+  useEffect(() => {
+    if (!engine || loadingState !== "ready") {
+      useClippingStore.getState().reset();
+      return;
+    }
+    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
+  }, [engine, loadingState]);
 
   useEffect(() => {
     if (!engine) return;
@@ -163,7 +187,10 @@ export default function ViewerPage() {
     (mode: ViewModeId) => {
       if (!engine) return;
       const ok = engine.applyViewMode(mode);
-      if (ok) setOrthographicView(mode);
+      if (ok) {
+        setOrthographicView(mode);
+        useClippingStore.getState().setClipSectionOrthoActive(false);
+      }
     },
     [engine, setOrthographicView],
   );
@@ -171,7 +198,59 @@ export default function ViewerPage() {
   const handleExitViewMode = useCallback(() => {
     engine?.exitViewMode();
     clearViewModeStore();
+    useClippingStore.getState().setClipSectionOrthoActive(false);
   }, [engine, clearViewModeStore]);
+
+  const handlePickClippingDirection = useCallback(
+    (dir: ClippingDirectionId) => {
+      if (!engine) return;
+      const cs = useClippingStore.getState();
+      if (cs.clipSectionOrthoActive) {
+        engine.exitViewMode();
+        clearViewModeStore();
+        cs.setClipSectionOrthoActive(false);
+      }
+      engine.enableClippingDirection(dir);
+      useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
+    },
+    [engine, clearViewModeStore],
+  );
+
+  const handleClippingDepth = useCallback((value: number) => {
+    if (!engine) return;
+    engine.setClippingDepthOffset(value);
+    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
+  }, [engine]);
+
+  const handleClippingFlip = useCallback(() => {
+    if (!engine) return;
+    engine.flipClipping();
+    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
+  }, [engine]);
+
+  const handleClippingCancel = useCallback(() => {
+    if (!engine) return;
+    engine.clearClipping();
+    clearViewModeStore();
+    useClippingStore.getState().setClipSectionOrthoActive(false);
+    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
+  }, [engine, clearViewModeStore]);
+
+  const handleClippingSectionViewToggle = useCallback(() => {
+    if (!engine) return;
+    const cs = useClippingStore.getState();
+    if (cs.clipSectionOrthoActive) {
+      engine.exitViewMode();
+      clearViewModeStore();
+      cs.setClipSectionOrthoActive(false);
+      return;
+    }
+    const ok = engine.applySectionViewFromActiveClipping();
+    if (!ok) return;
+    const snap = engine.getClippingUiSnapshot();
+    if (snap.direction) setOrthographicView(snap.direction);
+    cs.setClipSectionOrthoActive(true);
+  }, [engine, clearViewModeStore, setOrthographicView]);
 
   const hasRealIfcAssemblies = useMemo(
     () => (analyzerData?.assemblies ?? []).some((a) => a.expressId != null),
@@ -525,10 +604,24 @@ export default function ViewerPage() {
         sketchModeActive={sketchModeEnabled}
         onSketchToggle={handleSketchToggle}
         sketchDisabled={loadingState !== "ready"}
+        clippingDisabled={loadingState !== "ready"}
+        onPickClippingDirection={handlePickClippingDirection}
+      />
+
+      <ClippingActiveBar
+        snapshot={clipSnap}
+        onDepthChange={handleClippingDepth}
+        onFlip={handleClippingFlip}
+        onSectionViewToggle={handleClippingSectionViewToggle}
+        onCancel={handleClippingCancel}
       />
 
       {viewMode !== "none" && (
-        <ViewModeActiveBar viewMode={viewMode} onExit={handleExitViewMode} />
+        <ViewModeActiveBar
+          viewMode={viewMode}
+          onExit={handleExitViewMode}
+          liftAboveClippingHud={clipSnap.active}
+        />
       )}
 
       {viewerTool === "measurement" && <SmartMeasurementCard />}
