@@ -204,6 +204,14 @@ function getOrCreateEdgeLineMaterial(
   return m;
 }
 
+/** Pooled darker edge stroke — same rule as sketch {@link edgeLineColorFromFace}. */
+export function getOrCreateSketchEdgeLineMaterial(
+  pool: Map<number, THREE.LineBasicMaterial>,
+  ifcFaceColor: THREE.Color,
+): THREE.LineBasicMaterial {
+  return getOrCreateEdgeLineMaterial(pool, ifcFaceColor);
+}
+
 /** `LineSegments` under a non-instanced mesh when it has no sketch edge child yet. */
 function tryAttachNonInstancedSketchEdges(
   mesh: THREE.Mesh,

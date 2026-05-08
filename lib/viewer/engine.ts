@@ -18,6 +18,7 @@ import {
   buildSelectionHighlightMaterial,
   createEyeSteelLights,
 } from "@/lib/viewer/visual-policy";
+import { buildIsolationSelectionEdgeLines } from "@/lib/viewer/isolation-selection-edges";
 import {
   attachSketchEdges,
   createSketchFillMaterial,
@@ -128,6 +129,8 @@ export class ViewerEngine {
    * so mesh traversal does not fight ThatOpen LOD opacity overrides.
    */
   private isolationVisualMode: IsolationMode = "none";
+  /** Picked-only edge lines while tile sketch overlays are off in isolation / context. */
+  private isolationSelectionEdgeGroup: THREE.Group | null = null;
   private readonly contextOverlayMeshes: THREE.Mesh[] = [];
   /**
    * Serializes isolation RPCs + tile sync. Overlapping `applyIsolation` / `clearIsolationVisuals` (e.g. UI +
@@ -564,6 +567,52 @@ export class ViewerEngine {
   }
 
   /**
+   * Default tile sketch edges (LineSegments + LOD wire sidecars) ignore `setVisible` for some tiles,
+   * so hidden members leak as colored lines. Turn them off in **בודד** / **הצג בהקשר**; picked
+   * elements use {@link rebuildIsolationSelectionEdgeOverlay} instead.
+   */
+  private syncSketchEdgeVisibilityToIsolationState(): void {
+    if (!this.modelObject) return;
+    const hide =
+      this.isolationVisualMode === "isolated" || this.isolationVisualMode === "context";
+    setSketchEdgeVisibility(this.modelObject, !hide);
+  }
+
+  private clearIsolationSelectionEdgeOverlay(): void {
+    const g = this.isolationSelectionEdgeGroup;
+    if (!g) return;
+    g.removeFromParent();
+    g.traverse((obj) => {
+      if (obj instanceof THREE.LineSegments) obj.geometry?.dispose();
+    });
+    this.isolationSelectionEdgeGroup = null;
+  }
+
+  private async rebuildIsolationSelectionEdgeOverlay(
+    fragModel: FragmentsModel,
+    selected: Set<number>,
+  ): Promise<void> {
+    this.clearIsolationSelectionEdgeOverlay();
+    if (!this.modelObject || selected.size === 0) return;
+    if (this.isolationVisualMode !== "isolated" && this.isolationVisualMode !== "context") {
+      return;
+    }
+    try {
+      const group = await buildIsolationSelectionEdgeLines(
+        fragModel,
+        this.modelObject,
+        [...selected],
+        this.sketchEdgeMaterialPool,
+      );
+      if (group.children.length === 0) return;
+      this.isolationSelectionEdgeGroup = group;
+      this.modelObject.add(group);
+    } catch (err) {
+      console.warn("Isolation selection edge overlay failed:", err);
+    }
+  }
+
+  /**
    * Cached outlines once per {@link loadFile}. IFC fragments render via {@link LodMaterial};
    * we hide faces with `lodOpacity = 0` (replacing `mesh.material` is overwritten by the worker).
    */
@@ -591,8 +640,8 @@ export class ViewerEngine {
     });
 
     attachSketchEdges(this.modelObject, this.sketchEdgeMaterialPool);
-    /** Per-element darker edge strokes; visibility on for both sketch and default shaded view. */
-    setSketchEdgeVisibility(this.modelObject, true);
+    /** Per-element darker edge strokes; off in isolation/context (see overlay). */
+    this.syncSketchEdgeVisibilityToIsolationState();
     const hadMeshes = this.sketchMaterialBackup.size > 0;
     this.sketchEdgesBuilt = hadMeshes;
 
@@ -627,7 +676,7 @@ export class ViewerEngine {
 
     if (this.sketchMaterialBackup.size === 0) return;
 
-    setSketchEdgeVisibility(this.modelObject, true);
+    this.syncSketchEdgeVisibilityToIsolationState();
 
     const firstTimeReady = !this.sketchEdgesBuilt;
     const visualsDirty = firstTimeReady || newInBackup || newEdges > 0;
@@ -707,7 +756,7 @@ export class ViewerEngine {
         }
       });
 
-      setSketchEdgeVisibility(this.modelObject, true);
+      this.syncSketchEdgeVisibilityToIsolationState();
     } else {
       for (const [mat, opacity] of this.sketchLodOpacityBackup) {
         (mat as THREE.Material & { lodOpacity: number }).lodOpacity = opacity;
@@ -724,7 +773,7 @@ export class ViewerEngine {
       });
 
       /** CAD edges stay on for default shaded view (same geometry as sketch mode; zero extra load). */
-      setSketchEdgeVisibility(this.modelObject, true);
+      this.syncSketchEdgeVisibilityToIsolationState();
     }
 
     const fragments = this.components.get(OBC.FragmentsManager);
@@ -1396,6 +1445,7 @@ export class ViewerEngine {
   }
 
   private clearContextMainThreadVisuals(): void {
+    this.clearIsolationSelectionEdgeOverlay();
     setContextIsolationEdgeOpacity(
       null,
       this.modelObject,
@@ -1600,7 +1650,9 @@ export class ViewerEngine {
   }
 
   /**
-   * Full isolation: hide all non-selected items (worker visibility). Context: ghost opacity on non-selected.
+   * Full isolation: hide all non-selected items (worker visibility). Selection keeps IFC materials
+   * (no blue highlight). Default tile sketch edges are off (avoids leaking hidden geometry); picked
+   * locals get a dedicated edge overlay. Context: ghost snapshot faces + same overlay on picked.
    */
   applyIsolation(
     mode: "isolated" | "context",
@@ -1655,7 +1707,6 @@ export class ViewerEngine {
     if (mode === "isolated") {
       const toHide = allIds.filter((id) => !selected.has(id));
       await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
-      await this.applyHighlightToMap(map);
       this.isolationVisualMode = "isolated";
       await this.syncFragmentsViewForced(fragments);
       if (doFocus) {
@@ -1663,6 +1714,8 @@ export class ViewerEngine {
         await this.syncFragmentsViewForced(fragments);
       }
       await this.deferSyncFragmentsView(fragments);
+      this.syncSketchEdgeVisibilityToIsolationState();
+      await this.rebuildIsolationSelectionEdgeOverlay(fragModel, selected);
       return true;
     }
 
@@ -1678,14 +1731,11 @@ export class ViewerEngine {
     await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
     await this.syncFragmentsViewForced(fragments);
     this.isolationVisualMode = "context";
-    setContextIsolationEdgeOpacity(
-      CONTEXT_GHOST_FACE_OPACITY,
-      this.modelObject,
-      this.sketchEdgeMaterialPool,
-    );
     if (doFocus) {
       await this.focusBboxMap(map);
     }
+    this.syncSketchEdgeVisibilityToIsolationState();
+    await this.rebuildIsolationSelectionEdgeOverlay(fragModel, selected);
     return true;
   }
 
@@ -1711,6 +1761,7 @@ export class ViewerEngine {
         await this.deferSyncFragmentsView(fragments);
       } finally {
         this.clearSelectionOutlineTint();
+        this.syncSketchEdgeVisibilityToIsolationState();
       }
     });
   }
