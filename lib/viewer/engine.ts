@@ -19,18 +19,19 @@ import {
   createEyeSteelLights,
 } from "@/lib/viewer/visual-policy";
 import {
-  applyContextSketchEdgePickedBoost,
   attachSketchEdges,
-  clearContextSketchEdgePickedBoost,
   createSketchFillMaterial,
   ensureSketchEdgesAttached,
   isLodFragmentMaterial,
   restoreSelectionTintOnSketchLineSegments,
   setContextIsolationEdgeOpacity,
   setSketchEdgeVisibility,
-  syncSketchEdgeVisibilityFromLodFilter,
   stripSketchEdgeChildren,
 } from "@/lib/viewer/sketch-mode";
+import {
+  buildPickedEdgeOverlay,
+  disposePickedEdgeOverlay,
+} from "@/lib/viewer/picked-edge-overlay";
 import {
   cameraUpForViewMode,
   eyePositionFromCenter,
@@ -132,6 +133,13 @@ export class ViewerEngine {
    */
   private isolationVisualMode: IsolationMode = "none";
   private readonly contextOverlayMeshes: THREE.Mesh[] = [];
+  /**
+   * הצג בהקשר: full-opacity edge overlay for the picked items, drawn on top of the dimmed
+   * main-view sketch edges. Built per isolation transition by {@link buildPickedEdgeOverlay}
+   * (per-item geometry from `getItemsGeometry`, so picking one item never lights up its
+   * tile-mates' edges). Cleared by {@link clearContextMainThreadVisuals}.
+   */
+  private pickedEdgeOverlay: THREE.Group | null = null;
   /**
    * Serializes isolation RPCs + tile sync. Overlapping `applyIsolation` / `clearIsolationVisuals` (e.g. UI +
    * selection effects) yields a visible "blink" then a stale view on the ThatOpen worker/main bridge.
@@ -573,20 +581,16 @@ export class ViewerEngine {
 
   /**
    * Per-mode sketch edge visibility:
-   * - **`isolated`**: drive visibility from the worker's `itemFilter` (Option B). Tiles whose every
-   *   instance is culled hide their edges; mixed tiles rely on the LOD wire shader's
-   *   `itemFilter == 0 → gl_Position = vec4(0)` early-out.
-   * - **`context`**: keep all sketch edges visible — non-picked items are dimmed via
-   *   {@link setContextIsolationEdgeOpacity} to match the 15% ghost face overlay.
+   * - **`isolated`**: hide every main-view sketch edge. The picked element's outline is drawn by
+   *   {@link buildPickedEdgeOverlay} on top, so non-picked tile-mates can never bleed through
+   *   (which would happen with `itemFilter`-based hiding because shell meshes don't carry one).
+   * - **`context`**: keep edges visible — they're dimmed to 15% via
+   *   {@link setContextIsolationEdgeOpacity} to match the ghost faces.
    * - **`none`**: all edges visible at full opacity (live `lodColor` per element).
    */
   private syncSketchEdgeVisibilityToIsolationState(): void {
     if (!this.modelObject) return;
-    if (this.isolationVisualMode === "isolated") {
-      syncSketchEdgeVisibilityFromLodFilter(this.modelObject);
-    } else {
-      setSketchEdgeVisibility(this.modelObject, true);
-    }
+    setSketchEdgeVisibility(this.modelObject, this.isolationVisualMode !== "isolated");
   }
 
   /**
@@ -654,9 +658,6 @@ export class ViewerEngine {
     if (this.sketchMaterialBackup.size === 0) return;
 
     this.syncSketchEdgeVisibilityToIsolationState();
-    if (this.isolationVisualMode === "context") {
-      applyContextSketchEdgePickedBoost(this.modelObject);
-    }
 
     const firstTimeReady = !this.sketchEdgesBuilt;
     const visualsDirty = firstTimeReady || newInBackup || newEdges > 0;
@@ -1425,9 +1426,8 @@ export class ViewerEngine {
   }
 
   private clearContextMainThreadVisuals(): void {
-    if (this.modelObject) {
-      clearContextSketchEdgePickedBoost(this.modelObject);
-    }
+    disposePickedEdgeOverlay(this.pickedEdgeOverlay);
+    this.pickedEdgeOverlay = null;
     setContextIsolationEdgeOpacity(
       null,
       this.modelObject,
@@ -1697,6 +1697,21 @@ export class ViewerEngine {
       }
       await this.deferSyncFragmentsView(fragments);
       this.syncSketchEdgeVisibilityToIsolationState();
+      /**
+       * `setVisible(toHide, false)` only hides faces (worker draw groups / `itemFilter`); main-view
+       * sketch edges are independent line geometry that never tracks per-item visibility, so we hide
+       * them globally above and draw the picked outline as a per-item overlay built from
+       * `getItemsGeometry` — same source the context mode overlay uses.
+       */
+      if (this.modelObject) {
+        this.pickedEdgeOverlay = await buildPickedEdgeOverlay(
+          fragModel,
+          this.modelObject,
+          Array.from(selected),
+          this.sketchEdgeMaterialPool,
+        );
+        this.modelObject.add(this.pickedEdgeOverlay);
+      }
       return true;
     }
 
@@ -1717,9 +1732,9 @@ export class ViewerEngine {
     }
     /**
      * Match the 15% ghost face opacity on every sketch edge (LineBasic pool + LOD wire `lodOpacity`)
-     * so the rest of the model reads as a faint sketch. {@link applyContextSketchEdgePickedBoost}
-     * then lifts only the picked tiles' edges back to 100% — keeping the dimmed pool intact so the
-     * non-picked majority stays dimmed.
+     * so the rest of the model reads as a faint sketch. The picked element's crisp 100% outline is
+     * drawn on top by {@link buildPickedEdgeOverlay} — per-item geometry from `getItemsGeometry`,
+     * so picking one bolt never lights up its tile-mates.
      */
     setContextIsolationEdgeOpacity(
       CONTEXT_GHOST_FACE_OPACITY,
@@ -1728,7 +1743,13 @@ export class ViewerEngine {
     );
     this.syncSketchEdgeVisibilityToIsolationState();
     if (this.modelObject) {
-      applyContextSketchEdgePickedBoost(this.modelObject);
+      this.pickedEdgeOverlay = await buildPickedEdgeOverlay(
+        fragModel,
+        this.modelObject,
+        Array.from(selected),
+        this.sketchEdgeMaterialPool,
+      );
+      this.modelObject.add(this.pickedEdgeOverlay);
     }
     return true;
   }
