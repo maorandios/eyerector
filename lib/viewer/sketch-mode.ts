@@ -27,6 +27,18 @@ const SKETCH_INSTANCED_ONBEFORE_PREV = "eyeSteelSketchInstancedEdgeOnBeforePrev"
 
 const CONTEXT_EDGE_OPACITY_STASH = "eyeSteelContextEdgeOpacityStash";
 
+/**
+ * Per-mesh `lodOpacity` override consumed by {@link applyContextSketchWireLodOpacity}.
+ * Lets us boost picked tiles back to 1.0 while the global default is 0.15 in הצג בהקשר.
+ */
+const CONTEXT_LOD_WIRE_OPACITY_OVERRIDE = "eyeSteelContextLodWireOpacityOverride";
+
+/**
+ * LineSegments userData key. Stashes the *original pool* material reference so the picked-boost
+ * swap can be undone on isolation exit / mode switch without leaking cloned materials.
+ */
+const CONTEXT_LINE_BOOST_STASH = "eyeSteelContextLineBoostStash";
+
 /** While "הצג בהקשר" is active, LOD wire overlays use this `lodOpacity` each frame. */
 let activeContextSketchEdgeOpacity: number | null = null;
 
@@ -118,10 +130,157 @@ function restoreLineMaterialContextOpacity(m: THREE.LineBasicMaterial): void {
 function applyContextSketchWireLodOpacity(wireMat: THREE.Material): void {
   if (!isLodFragmentMaterial(wireMat)) return;
   const m = wireMat as LodLikeMaterial;
+  const ud = m.userData as Record<string, unknown>;
+  const override = ud[CONTEXT_LOD_WIRE_OPACITY_OVERRIDE];
+  if (typeof override === "number") {
+    m.lodOpacity = override;
+    return;
+  }
   if (activeContextSketchEdgeOpacity != null) {
     m.lodOpacity = activeContextSketchEdgeOpacity;
   } else {
     m.lodOpacity = 1;
+  }
+}
+
+/**
+ * Detect whether a fragment tile contains *any* item the worker considers visible.
+ * - **LOD geometries** carry an `itemFilter` instanced attribute (`>=1` = visible).
+ * - **Shell geometries** drop visibility through `geometry.groups` (only visible item ranges).
+ * Fallback (no signal): treat as visible to avoid accidentally hiding live tiles.
+ */
+function meshHasAnyVisibleItem(mesh: THREE.Mesh): boolean {
+  const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+  const filter = geom?.getAttribute("itemFilter") as
+    | THREE.BufferAttribute
+    | THREE.InstancedBufferAttribute
+    | undefined;
+  if (filter && filter.count > 0) {
+    const arr = filter.array as ArrayLike<number>;
+    for (let i = 0; i < filter.count; i++) {
+      if (Number(arr[i]) >= 1) return true;
+    }
+    return false;
+  }
+  if (geom?.groups && geom.groups.length > 0) {
+    for (const g of geom.groups) {
+      if ((g.count ?? 0) > 0) return true;
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * "הצג בהקשר": for every fragment tile that contains a picked (still-visible) item, lift its sketch
+ * edges back to full opacity even though the global pool dim is at 15%. We do this per-mesh so the
+ * shared `LineBasic` pool stays untouched (still drives non-picked tiles dim) while picked tiles
+ * use a fresh material clone + a per-mesh `lodOpacity` override on the LOD wire sidecar.
+ */
+export function applyContextSketchEdgePickedBoost(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    if (obj.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
+    const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
+    if (!mesh.isMesh) return;
+    if (!meshHasAnyVisibleItem(mesh)) return;
+
+    for (const ch of mesh.children) {
+      if (ch.name !== SKETCH_EDGE_CHILD_NAME) continue;
+      boostLineSegmentsToFullOpacity(ch as THREE.LineSegments);
+    }
+
+    const ud = mesh.userData as Record<string, unknown>;
+    const wire = ud[SKETCH_INSTANCED_EDGE_USERDATA] as THREE.InstancedMesh | undefined;
+    if (wire) setLodWireOpacityOverride(wire.material, 1);
+  });
+}
+
+/**
+ * Undo {@link applyContextSketchEdgePickedBoost}: swap LineSegments back to their stashed pool
+ * material reference and dispose the throw-away clone, then drop the LOD wire override so the
+ * per-frame default (`activeContextSketchEdgeOpacity` or 1) takes back over.
+ */
+export function clearContextSketchEdgePickedBoost(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    if (obj.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
+    const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
+    if (!mesh.isMesh) return;
+
+    for (const ch of mesh.children) {
+      if (ch.name !== SKETCH_EDGE_CHILD_NAME) continue;
+      restoreLineSegmentsFromBoost(ch as THREE.LineSegments);
+    }
+
+    const ud = mesh.userData as Record<string, unknown>;
+    const wire = ud[SKETCH_INSTANCED_EDGE_USERDATA] as THREE.InstancedMesh | undefined;
+    if (wire) clearLodWireOpacityOverride(wire.material);
+  });
+}
+
+function boostLineSegmentsToFullOpacity(ls: THREE.LineSegments): void {
+  const ud = ls.userData as Record<string, unknown>;
+  if (CONTEXT_LINE_BOOST_STASH in ud) return;
+  const cur = ls.material;
+  const stashRef: THREE.Material | THREE.Material[] = cur;
+
+  const liftOne = (m: THREE.Material): THREE.Material => {
+    if (!(m instanceof THREE.LineBasicMaterial)) return m;
+    const c = m.clone();
+    c.opacity = 1;
+    c.transparent = false;
+    c.depthWrite = true;
+    c.needsUpdate = true;
+    return c;
+  };
+
+  ls.material = Array.isArray(cur) ? cur.map(liftOne) : liftOne(cur);
+  ud[CONTEXT_LINE_BOOST_STASH] = stashRef;
+}
+
+function restoreLineSegmentsFromBoost(ls: THREE.LineSegments): void {
+  const ud = ls.userData as Record<string, unknown>;
+  const stashed = ud[CONTEXT_LINE_BOOST_STASH] as
+    | THREE.Material
+    | THREE.Material[]
+    | undefined;
+  if (!stashed) return;
+
+  const cur = ls.material;
+  const curArr = Array.isArray(cur) ? cur : [cur];
+  const stashedArr = Array.isArray(stashed) ? stashed : [stashed];
+  for (const m of curArr) {
+    if (m instanceof THREE.LineBasicMaterial && !stashedArr.includes(m)) {
+      m.dispose();
+    }
+  }
+  ls.material = stashed;
+  delete ud[CONTEXT_LINE_BOOST_STASH];
+}
+
+function setLodWireOpacityOverride(
+  mat: THREE.Material | THREE.Material[],
+  value: number,
+): void {
+  const apply = (m: THREE.Material): void => {
+    if (!isLodFragmentMaterial(m)) return;
+    (m.userData as Record<string, unknown>)[CONTEXT_LOD_WIRE_OPACITY_OVERRIDE] = value;
+  };
+  if (Array.isArray(mat)) {
+    for (const m of mat) apply(m);
+  } else {
+    apply(mat);
+  }
+}
+
+function clearLodWireOpacityOverride(mat: THREE.Material | THREE.Material[]): void {
+  const drop = (m: THREE.Material): void => {
+    if (!isLodFragmentMaterial(m)) return;
+    delete (m.userData as Record<string, unknown>)[CONTEXT_LOD_WIRE_OPACITY_OVERRIDE];
+  };
+  if (Array.isArray(mat)) {
+    for (const m of mat) drop(m);
+  } else {
+    drop(mat);
   }
 }
 

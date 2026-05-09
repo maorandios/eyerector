@@ -19,7 +19,9 @@ import {
   createEyeSteelLights,
 } from "@/lib/viewer/visual-policy";
 import {
+  applyContextSketchEdgePickedBoost,
   attachSketchEdges,
+  clearContextSketchEdgePickedBoost,
   createSketchFillMaterial,
   ensureSketchEdgesAttached,
   isLodFragmentMaterial,
@@ -652,6 +654,9 @@ export class ViewerEngine {
     if (this.sketchMaterialBackup.size === 0) return;
 
     this.syncSketchEdgeVisibilityToIsolationState();
+    if (this.isolationVisualMode === "context") {
+      applyContextSketchEdgePickedBoost(this.modelObject);
+    }
 
     const firstTimeReady = !this.sketchEdgesBuilt;
     const visualsDirty = firstTimeReady || newInBackup || newEdges > 0;
@@ -1420,6 +1425,9 @@ export class ViewerEngine {
   }
 
   private clearContextMainThreadVisuals(): void {
+    if (this.modelObject) {
+      clearContextSketchEdgePickedBoost(this.modelObject);
+    }
     setContextIsolationEdgeOpacity(
       null,
       this.modelObject,
@@ -1709,8 +1717,9 @@ export class ViewerEngine {
     }
     /**
      * Match the 15% ghost face opacity on every sketch edge (LineBasic pool + LOD wire `lodOpacity`)
-     * so the rest of the model reads as a faint sketch. The picked element keeps a 100% face that
-     * still pops visually against the dimmed edges + ghosts.
+     * so the rest of the model reads as a faint sketch. {@link applyContextSketchEdgePickedBoost}
+     * then lifts only the picked tiles' edges back to 100% — keeping the dimmed pool intact so the
+     * non-picked majority stays dimmed.
      */
     setContextIsolationEdgeOpacity(
       CONTEXT_GHOST_FACE_OPACITY,
@@ -1718,6 +1727,9 @@ export class ViewerEngine {
       this.sketchEdgeMaterialPool,
     );
     this.syncSketchEdgeVisibilityToIsolationState();
+    if (this.modelObject) {
+      applyContextSketchEdgePickedBoost(this.modelObject);
+    }
     return true;
   }
 
