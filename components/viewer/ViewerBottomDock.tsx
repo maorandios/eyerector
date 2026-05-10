@@ -43,6 +43,7 @@ interface Props {
   markupDrawingDisabled?: boolean;
   onMarkupDrawingToggle?: () => void;
   onMarkupDrawingClear?: () => void;
+  onSnapshot?: () => void;
 }
 
 /**
@@ -73,6 +74,7 @@ export function ViewerBottomDock({
   markupDrawingDisabled = false,
   onMarkupDrawingToggle,
   onMarkupDrawingClear,
+  onSnapshot,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -151,6 +153,18 @@ export function ViewerBottomDock({
           >
             <Search className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
             חיפוש
+          </Button>
+        )}
+
+        {onSnapshot && (
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
+            title="צילום התצוגה (ללא תפריטים)"
+            onClick={() => onSnapshot()}
+          >
+            צילום
           </Button>
         )}
 

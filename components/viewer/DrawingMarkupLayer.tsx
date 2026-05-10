@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { cn } from "@/lib/utils";
 
 type Pt = { x: number; y: number };
@@ -63,19 +70,30 @@ function drawStrokesOnCanvas(
   }
 }
 
+export type DrawingMarkupLayerHandle = {
+  getMarkupCanvas: () => HTMLCanvasElement | null;
+};
+
 /** Normalized overlay on the viewport; strokes kept when mode is off (pointer-events-none). */
-export function DrawingMarkupLayer({
-  active,
-  clearSignal,
-  onInkPresenceChange,
-}: {
-  active: boolean;
-  /** Increments when user taps נקה — clears all ink. */
-  clearSignal: number;
-  onInkPresenceChange?: (hasInk: boolean) => void;
-}) {
+export const DrawingMarkupLayer = forwardRef<
+  DrawingMarkupLayerHandle,
+  {
+    active: boolean;
+    /** Increments when user taps נקה — clears all ink. */
+    clearSignal: number;
+    onInkPresenceChange?: (hasInk: boolean) => void;
+  }
+>(function DrawingMarkupLayer({ active, clearSignal, onInkPresenceChange }, ref) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      getMarkupCanvas: () => canvasRef.current,
+    }),
+    [],
+  );
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [current, setCurrent] = useState<Stroke | null>(null);
   const drawingRef = useRef(false);
@@ -210,4 +228,6 @@ export function DrawingMarkupLayer({
       />
     </div>
   );
-}
+});
+
+DrawingMarkupLayer.displayName = "DrawingMarkupLayer";

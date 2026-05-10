@@ -951,6 +951,12 @@ export class ViewerEngine {
     };
   }
 
+  /** Three.js canvas (3D view only — UI lives in separate layers). */
+  getViewCanvas(): HTMLCanvasElement | null {
+    const el = this.world?.renderer?.three?.domElement;
+    return el instanceof HTMLCanvasElement ? el : null;
+  }
+
   private applyUserClippingToRenderer(): void {
     if (this.disposed || !this.userClippingActive || !this.modelObject || !this.userClipDirection) return;
 

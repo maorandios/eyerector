@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
@@ -35,7 +35,11 @@ import {
   displayPartMark,
   type AggregatedProfileTabRow,
 } from "@/components/viewer/SelectionPickDetails";
-import { DrawingMarkupLayer } from "@/components/viewer/DrawingMarkupLayer";
+import {
+  DrawingMarkupLayer,
+  type DrawingMarkupLayerHandle,
+} from "@/components/viewer/DrawingMarkupLayer";
+import { ViewerSnapshotToasts } from "@/components/viewer/ViewerSnapshotToasts";
 import { GlobalSearchOverlay } from "@/components/viewer/GlobalSearchOverlay";
 import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
 import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
@@ -46,6 +50,10 @@ import {
   analyzerEntityMatchesPick,
   analyzerRefsFromAssembly,
 } from "@/lib/viewer/ifc-guid";
+import {
+  compositeViewerSnapshotPngBlob,
+  copyImageBlobToClipboard,
+} from "@/lib/viewer/view-snapshot";
 
 import {
   aggregateAssembliesByMark,
@@ -77,6 +85,11 @@ export default function ViewerPage() {
   const [markupDrawingEnabled, setMarkupDrawingEnabled] = useState(false);
   const [drawingClearSignal, setDrawingClearSignal] = useState(0);
   const [hasMarkupInk, setHasMarkupInk] = useState(false);
+  const markupLayerRef = useRef<DrawingMarkupLayerHandle>(null);
+  const [snapshotCopyToast, setSnapshotCopyToast] = useState(false);
+  const [snapshotDownloadUrl, setSnapshotDownloadUrl] = useState<string | null>(null);
+  const snapshotCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const snapshotDownloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const {
     file,
     analyzerData,
@@ -875,6 +888,90 @@ export default function ViewerPage() {
     setDrawingClearSignal((n) => n + 1);
   }, []);
 
+  const clearSnapshotTimers = useCallback(() => {
+    if (snapshotCopyTimerRef.current) {
+      clearTimeout(snapshotCopyTimerRef.current);
+      snapshotCopyTimerRef.current = null;
+    }
+    if (snapshotDownloadTimerRef.current) {
+      clearTimeout(snapshotDownloadTimerRef.current);
+      snapshotDownloadTimerRef.current = null;
+    }
+  }, []);
+
+  const snapshotDownloadUrlCleanupRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    snapshotDownloadUrlCleanupRef.current = snapshotDownloadUrl;
+  }, [snapshotDownloadUrl]);
+
+  useEffect(() => {
+    return () => {
+      clearSnapshotTimers();
+      const u = snapshotDownloadUrlCleanupRef.current;
+      if (u) URL.revokeObjectURL(u);
+      snapshotDownloadUrlCleanupRef.current = null;
+    };
+  }, [clearSnapshotTimers]);
+
+  const handleSnapshotDownload = useCallback(() => {
+    setSnapshotDownloadUrl((url) => {
+      if (!url) return null;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `eyesteel-view-${Date.now()}.png`;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return null;
+    });
+    clearSnapshotTimers();
+    setSnapshotCopyToast(false);
+  }, [clearSnapshotTimers]);
+
+  const handleViewSnapshot = useCallback(async () => {
+    if (!engine || loadingState !== "ready") return;
+    const webgl = engine.getViewCanvas();
+    if (!webgl) return;
+
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+    const markupCanvas = markupLayerRef.current?.getMarkupCanvas() ?? null;
+    const blob = await compositeViewerSnapshotPngBlob(webgl, markupCanvas);
+    if (!blob) return;
+
+    clearSnapshotTimers();
+
+    const copied = await copyImageBlobToClipboard(blob);
+
+    setSnapshotDownloadUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(blob);
+    });
+
+    if (copied) {
+      setSnapshotCopyToast(true);
+      snapshotCopyTimerRef.current = setTimeout(() => {
+        snapshotCopyTimerRef.current = null;
+        setSnapshotCopyToast(false);
+      }, 4500);
+    } else {
+      setSnapshotCopyToast(false);
+    }
+
+    snapshotDownloadTimerRef.current = setTimeout(() => {
+      snapshotDownloadTimerRef.current = null;
+      setSnapshotDownloadUrl((u) => {
+        if (u) URL.revokeObjectURL(u);
+        return null;
+      });
+      setSnapshotCopyToast(false);
+    }, 60_000);
+  }, [engine, loadingState, clearSnapshotTimers]);
+
   const handleDockSelectionMode = useCallback((m: SelectionMode) => {
     setSelectionMode(m);
     if (m === "part") {
@@ -897,11 +994,18 @@ export default function ViewerPage() {
       </div>
       {loadingState === "ready" && (
         <DrawingMarkupLayer
+          ref={markupLayerRef}
           active={markupDrawingEnabled}
           clearSignal={drawingClearSignal}
           onInkPresenceChange={setHasMarkupInk}
         />
       )}
+
+      <ViewerSnapshotToasts
+        copyToastVisible={snapshotCopyToast}
+        downloadUrl={snapshotDownloadUrl}
+        onDownload={handleSnapshotDownload}
+      />
       <div className="pointer-events-auto absolute left-3 top-3 z-40 safe-top">
         <Button variant="secondary" size="lg" className="shadow-lg" onClick={() => router.push("/")}>
           {he.backToUpload}
@@ -965,6 +1069,7 @@ export default function ViewerPage() {
         onGlobalSearch={
           loadingState === "ready" && analyzerData ? () => setGlobalSearchOpen(true) : undefined
         }
+        onSnapshot={loadingState === "ready" ? () => void handleViewSnapshot() : undefined}
         measurementActive={viewerTool === "measurement"}
         onMeasurementToggle={toggleMeasurementTool}
         onMeasurementClear={() => engine?.clearMeasurements()}
