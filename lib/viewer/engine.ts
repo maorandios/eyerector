@@ -29,6 +29,7 @@ import {
   stripSketchEdgeChildren,
 } from "@/lib/viewer/sketch-mode";
 import {
+  VIEW_FILTER_EDGE_OVERLAY_NAME,
   buildPickedEdgeOverlay,
   disposeConstructedEdgeOverlayGroup,
   disposePickedEdgeOverlay,
@@ -148,6 +149,12 @@ export class ViewerEngine {
   private isolationHiddenExcludedLocals: Set<number> | null = null;
   private hiddenRemainderSketchNonce = 0;
   private hiddenRemainderSketchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * סינון תצוגה sketch outlines — native per-tile rails off; remainder from {@link buildPickedEdgeOverlay}
+   * (same leak fix as isolation הסתר for batched LOD wires).
+   */
+  private viewFilterEdgeOverlay: THREE.Group | null = null;
+  private viewFilterSuppressMainSketchEdges = false;
   /**
    * Serializes isolation RPCs + tile sync. Overlapping `applyIsolation` / `clearIsolationVisuals` (e.g. UI +
    * selection effects) yields a visible "blink" then a stale view on the ThatOpen worker/main bridge.
@@ -602,6 +609,10 @@ export class ViewerEngine {
   private syncSketchEdgeVisibilityToIsolationState(): void {
     if (!this.modelObject) return;
     if (this.isolationVisualMode === "isolated" || this.isolationVisualMode === "hidden") {
+      setSketchEdgeVisibility(this.modelObject, false);
+      return;
+    }
+    if (this.viewFilterSuppressMainSketchEdges) {
       setSketchEdgeVisibility(this.modelObject, false);
       return;
     }
@@ -1525,6 +1536,9 @@ export class ViewerEngine {
   private clearContextMainThreadVisuals(): void {
     disposePickedEdgeOverlay(this.pickedEdgeOverlay);
     this.pickedEdgeOverlay = null;
+    disposePickedEdgeOverlay(this.viewFilterEdgeOverlay);
+    this.viewFilterEdgeOverlay = null;
+    this.viewFilterSuppressMainSketchEdges = false;
     setContextIsolationEdgeOpacity(
       null,
       this.modelObject,
@@ -1913,6 +1927,72 @@ export class ViewerEngine {
         this.clearSelectionOutlineTint();
         this.syncSketchEdgeVisibilityToIsolationState();
       }
+    });
+  }
+
+  /**
+   * View filter (סינון תצוגה): reset fragment visibility, then hide the given locals.
+   * Does not set {@link isolationVisualMode}; pair with UI that clears isolation highlight first.
+   */
+  applyViewVisibilityFilter(hiddenLocalIds: Set<number>): Promise<void> {
+    return this.enqueueIsolation(async () => {
+      if (this.disposed || !this.modelId) return;
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (!fragments.initialized) return;
+      const fragModel = fragments.list.get(this.modelId);
+      if (!fragModel) return;
+
+      this.viewFilterSuppressMainSketchEdges = hiddenLocalIds.size > 0;
+      disposePickedEdgeOverlay(this.viewFilterEdgeOverlay);
+      this.viewFilterEdgeOverlay = null;
+
+      await fragModel.resetVisible();
+      await this.syncFragmentsViewForced(fragments);
+
+      const ids = [...hiddenLocalIds];
+      if (ids.length > 0) {
+        await this.chunkInvokeIds(ids, (slice) => fragModel.setVisible(slice, false));
+      }
+      await this.syncFragmentsViewForced(fragments);
+      await this.deferSyncFragmentsView(fragments);
+
+      if (!this.modelObject || !this.sketchEdgesBuilt) {
+        return;
+      }
+
+      if (hiddenLocalIds.size === 0) {
+        this.syncSketchEdgeVisibilityToIsolationState();
+        return;
+      }
+
+      setSketchEdgeVisibility(this.modelObject, false);
+
+      const allIds = await this.allFragmentLocalIds(fragModel);
+      const hiddenSet = new Set(hiddenLocalIds);
+      const visibleIds = allIds.filter((id) => !hiddenSet.has(id));
+
+      if (visibleIds.length === 0) {
+        this.syncSketchEdgeVisibilityToIsolationState();
+        return;
+      }
+
+      const overlay = await buildPickedEdgeOverlay(
+        fragModel,
+        this.modelObject,
+        visibleIds,
+        this.sketchEdgeMaterialPool,
+        {
+          yieldBetweenBatches: true,
+          groupName: VIEW_FILTER_EDGE_OVERLAY_NAME,
+        },
+      );
+
+      if (overlay.children.length > 0) {
+        this.viewFilterEdgeOverlay = overlay;
+        this.modelObject.add(overlay);
+      }
+
+      this.syncSketchEdgeVisibilityToIsolationState();
     });
   }
 

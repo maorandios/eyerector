@@ -10,7 +10,7 @@ interface AppState {
   mode: ViewerMode;
   selectedElement: Element | null;
   search: string;
-  activeSheet: "none" | "search" | "layers" | "details" | "parts";
+  activeSheet: "none" | "search" | "layers" | "details" | "parts" | "filter";
   categoryVisibility: Record<string, boolean>;
   transparencyEnabled: boolean;
   sketchModeEnabled: boolean;

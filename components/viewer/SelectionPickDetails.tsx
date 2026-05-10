@@ -195,7 +195,8 @@ export function aggregateSteelPartsForModelTab(parts: AnalyzerPart[]): {
   return rows;
 }
 
-function ifcSteelEntityQtyContribution(p: AnalyzerPart): number {
+/** Tekla Quantity / IFC contribution for one part row — shared with סינון תצוגה. */
+export function steelPartEntityQtyContribution(p: AnalyzerPart): number {
   const q = p.quantity;
   if (q != null && !Number.isNaN(q) && q > 0) return Math.round(q);
   return 1;
@@ -229,7 +230,7 @@ export function aggregateProfilesForModelTab(parts: AnalyzerPart[]): AggregatedP
     let sumKg = 0;
     let anyW = false;
     for (const p of v.instances) {
-      totalQty += ifcSteelEntityQtyContribution(p);
+      totalQty += steelPartEntityQtyContribution(p);
       if (p.weightKg != null && !Number.isNaN(p.weightKg)) {
         sumKg += p.weightKg;
         anyW = true;

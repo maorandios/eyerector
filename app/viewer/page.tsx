@@ -35,6 +35,10 @@ import {
   displayPartMark,
   type AggregatedProfileTabRow,
 } from "@/components/viewer/SelectionPickDetails";
+import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
+import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
+import { useViewFilterStore } from "@/lib/state/view-filter-store";
+import { resolveViewFilterHiddenLocals } from "@/lib/viewer/view-filter-resolve";
 import { formatCount, formatKgPlain, formatQuantityInt } from "@/lib/format-numbers";
 import {
   analyzerEntityMatchesPick,
@@ -283,6 +287,12 @@ export default function ViewerPage() {
     queueMicrotask(() => setAssemblyStructureNotice(false));
   }, [analyzerData, hasRealIfcAssemblies]);
 
+  useEffect(() => {
+    useViewFilterStore.getState().reset();
+  }, [analyzerData]);
+
+  useViewFilterSync(engine, analyzerData, loadingState);
+
   const assemblyRollupAll = useMemo(
     () => aggregateAssembliesByMark(analyzerData?.assemblies ?? []),
     [analyzerData?.assemblies],
@@ -358,6 +368,48 @@ export default function ViewerPage() {
     return [];
   }, [profileGroupDetail, selectedAssembly, selectedPart]);
 
+  /** Re-run סינון תצוגה worker state after anything that calls `resetVisible` (e.g. `clearIsolationVisuals`). */
+  const reapplyViewFilterIfNeeded = useCallback(async (eng: ViewerEngine) => {
+    const vf = useViewFilterStore.getState();
+    const data = useAppStore.getState().analyzerData;
+    if (!data) return;
+    if (
+      Object.keys(vf.hiddenAssemblyKeys).length === 0 &&
+      Object.keys(vf.hiddenPartIds).length === 0 &&
+      Object.keys(vf.hiddenPartTabGroupKeys).length === 0 &&
+      Object.keys(vf.hiddenProfileTabGroupKeys).length === 0
+    ) {
+      return;
+    }
+    const hidden = await resolveViewFilterHiddenLocals(eng, data, {
+      hiddenAssemblyKeys: vf.hiddenAssemblyKeys,
+      hiddenPartIds: vf.hiddenPartIds,
+      hiddenPartTabGroupKeys: vf.hiddenPartTabGroupKeys,
+      hiddenProfileTabGroupKeys: vf.hiddenProfileTabGroupKeys,
+    });
+    await eng.applyViewVisibilityFilter(hidden);
+  }, []);
+
+  /**
+   * Clears selection highlight / isolation without breaking סינון תצוגה: never call `clearIsolationVisuals`
+   * when isolation mode is none (that resets all fragment visibility). When isolation was on, restore
+   * the filter after the worker reset.
+   */
+  const clearEngineSelectionPreservingViewFilter = useCallback(
+    async (eng: ViewerEngine) => {
+      if (useIsolationStore.getState().isolationMode !== "none") {
+        await eng.clearIsolationVisuals();
+        useIsolationStore.getState().clearIsolation();
+        await reapplyViewFilterIfNeeded(eng);
+      } else {
+        await eng.clearHighlight();
+        useIsolationStore.getState().clearIsolation();
+      }
+      eng.setTransparency(useAppStore.getState().transparencyEnabled);
+    },
+    [reapplyViewFilterIfNeeded],
+  );
+
   const handleIsolationIsolate = useCallback(async () => {
     if (!engine) return;
     const ids = await engine.resolveIsolationLocalIds(isolationRefs);
@@ -393,14 +445,9 @@ export default function ViewerPage() {
     await engine.clearIsolationVisuals();
     useIsolationStore.getState().clearIsolation();
     engine.setTransparency(useAppStore.getState().transparencyEnabled);
-    /**
-     * Re-applying selection highlight immediately after "show all" has been correlated with
-     * context opacity not taking effect on the next runs (worker ops succeed, visuals stay solid).
-     * Keep show-all as a full visual reset; selection state is still preserved in the store/UI.
-     */
-    await engine.clearHighlight();
+    await reapplyViewFilterIfNeeded(engine);
     useMultiSelectStore.getState().exitMultiSelectSession();
-  }, [engine]);
+  }, [engine, reapplyViewFilterIfNeeded]);
 
   const handleEnterMultiSelect = useCallback(() => {
     if (!engine || viewerTool === "measurement" || isolationMode !== "none") return;
@@ -466,10 +513,7 @@ export default function ViewerPage() {
         setSelectedAssemblyId(null);
         setSelectedPartId(null);
         if (engine) {
-          await engine.clearIsolationVisuals();
-          useIsolationStore.getState().clearIsolation();
-          engine.setTransparency(useAppStore.getState().transparencyEnabled);
-          await engine.clearHighlight();
+          await clearEngineSelectionPreservingViewFilter(engine);
         }
         return;
       }
@@ -490,7 +534,7 @@ export default function ViewerPage() {
         `Assembly: ${assembly.assemblyMark || assembly.name || assembly.id} (${formatCount(partIds.size)} חלקים${boltCount ? `, ${formatCount(boltCount)} ברגים` : ""})`,
       );
     },
-    [engine, setActiveSheet, analyzerData?.assemblies],
+    [engine, setActiveSheet, analyzerData?.assemblies, clearEngineSelectionPreservingViewFilter],
   );
 
   const selectAggregatedAssemblyRow = useCallback(
@@ -562,10 +606,7 @@ export default function ViewerPage() {
       setSelectedAssemblyId(null);
       if (!engine) return;
       if (!part) {
-        await engine.clearIsolationVisuals();
-        useIsolationStore.getState().clearIsolation();
-        engine.setTransparency(useAppStore.getState().transparencyEnabled);
-        await engine.clearHighlight();
+        await clearEngineSelectionPreservingViewFilter(engine);
         return;
       }
       const refs = [{ id: part.id, expressId: part.expressId }];
@@ -578,7 +619,7 @@ export default function ViewerPage() {
           : `חלק: ${displayPartMark(part as AnalyzerPart)}`,
       );
     },
-    [engine, setActiveSheet],
+    [engine, setActiveSheet, clearEngineSelectionPreservingViewFilter],
   );
 
   const selectPartInstances = useCallback(
@@ -607,16 +648,15 @@ export default function ViewerPage() {
   const clearViewerSelection = useCallback(async () => {
     setAssemblyStructureNotice(false);
     useMultiSelectStore.getState().exitMultiSelectSession();
-    if (engine) {
-      await engine.clearIsolationVisuals();
-      useIsolationStore.getState().clearIsolation();
-      engine.setTransparency(useAppStore.getState().transparencyEnabled);
-    }
-    await selectAssembly(null);
-    await selectPart(null);
+    setAssemblyDetailOverride(null);
+    setSelectedAssemblyId(null);
+    setSelectedPartId(null);
     setProfileGroupDetail(null);
+    if (engine) {
+      await clearEngineSelectionPreservingViewFilter(engine);
+    }
     setSelectionStatus("נוקה");
-  }, [engine, selectAssembly, selectPart]);
+  }, [engine, clearEngineSelectionPreservingViewFilter]);
 
   useEffect(() => {
     if (!engine) return;
@@ -789,6 +829,7 @@ export default function ViewerPage() {
   }, []);
 
   const showDataPanel = activeSheet === "details";
+  const showFilterPanel = activeSheet === "filter";
 
   return (
     <main className="relative h-screen w-screen overflow-hidden">
@@ -850,6 +891,11 @@ export default function ViewerPage() {
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
         onDashboard={() => setActiveSheet("details")}
+        onViewFilter={
+          loadingState === "ready" && analyzerData
+            ? () => setActiveSheet("filter")
+            : undefined
+        }
         measurementActive={viewerTool === "measurement"}
         onMeasurementToggle={toggleMeasurementTool}
         onMeasurementClear={() => engine?.clearMeasurements()}
@@ -887,6 +933,21 @@ export default function ViewerPage() {
       )}
 
       {viewerTool === "measurement" && <SmartMeasurementCard />}
+
+      {showFilterPanel && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex justify-end">
+          <aside
+            className="pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-700 bg-zinc-950/95 p-4 pt-16 shadow-2xl"
+            dir="rtl"
+          >
+            <ViewFilterPanel
+              assemblies={analyzerData?.assemblies ?? []}
+              steelParts={steelPartsAll}
+              onClose={() => setActiveSheet("none")}
+            />
+          </aside>
+        </div>
+      )}
 
       {showDataPanel && (
         <div className="pointer-events-none absolute inset-0 z-30 flex justify-end">

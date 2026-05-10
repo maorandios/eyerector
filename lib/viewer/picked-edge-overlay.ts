@@ -14,6 +14,9 @@ import {
  */
 export const PICKED_EDGE_OVERLAY_NAME = "eyeSteel-picked-edge-overlay";
 
+/** Same geometry pipeline as {@link PICKED_EDGE_OVERLAY_NAME}, used for סינון תצוגה remainder edges. */
+export const VIEW_FILTER_EDGE_OVERLAY_NAME = "eyeSteel-view-filter-edge-overlay";
+
 const FALLBACK_EDGE_COLOR = new THREE.Color(0x9ca3af);
 
 const GEOM_BATCH = 48;
@@ -62,7 +65,7 @@ function readMeshFaceColor(mesh: THREE.Mesh): THREE.Color | null {
 function buildTileMeshIndex(modelRoot: THREE.Object3D): Map<number, THREE.Mesh> {
   const out = new Map<number, THREE.Mesh>();
   modelRoot.traverse((obj) => {
-    if (obj.name === PICKED_EDGE_OVERLAY_NAME) return;
+    if (obj.name === PICKED_EDGE_OVERLAY_NAME || obj.name === VIEW_FILTER_EDGE_OVERLAY_NAME) return;
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh) return;
     const tileId = (mesh.userData as Record<string, unknown>).tileId;
@@ -217,6 +220,8 @@ function meshDataToBufferGeometry(mesh: MeshData): THREE.BufferGeometry | null {
 export type BuildPickedEdgeOverlayOptions = {
   /** Yield between worker geometry batches so large “show everyone except hidden” passes stay responsive. */
   yieldBetweenBatches?: boolean;
+  /** Root group name (default {@link PICKED_EDGE_OVERLAY_NAME}). */
+  groupName?: string;
 };
 
 export async function buildPickedEdgeOverlay(
@@ -227,7 +232,8 @@ export async function buildPickedEdgeOverlay(
   options?: BuildPickedEdgeOverlayOptions,
 ): Promise<THREE.Group> {
   const group = new THREE.Group();
-  group.name = PICKED_EDGE_OVERLAY_NAME;
+  const rootName = options?.groupName ?? PICKED_EDGE_OVERLAY_NAME;
+  group.name = rootName;
   const ids = [...new Set(pickedLocalIds)].filter((n) => Number.isFinite(n));
   if (ids.length === 0) return group;
 
@@ -268,7 +274,7 @@ export async function buildPickedEdgeOverlay(
         }
         g.dispose();
         const lines = new THREE.LineSegments(edgesGeom, lineMat);
-        lines.name = `${PICKED_EDGE_OVERLAY_NAME}-line`;
+        lines.name = `${rootName}-line`;
         lines.raycast = () => {};
         lines.frustumCulled = true;
         /** Above the dimmed main-view edges (renderOrder 1) and ghost faces (renderOrder -10). */

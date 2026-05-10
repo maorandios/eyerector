@@ -21,6 +21,7 @@ interface Props {
   selectionMode: SelectionMode;
   onSelectionModeChange: (mode: SelectionMode) => void;
   onDashboard: () => void;
+  onViewFilter?: () => void;
   measurementActive: boolean;
   onMeasurementToggle: () => void;
   onMeasurementClear: () => void;
@@ -44,6 +45,7 @@ export function ViewerBottomDock({
   selectionMode,
   onSelectionModeChange,
   onDashboard,
+  onViewFilter,
   measurementActive,
   onMeasurementToggle,
   onMeasurementClear,
@@ -123,6 +125,17 @@ export function ViewerBottomDock({
         >
           דאשבורד
         </Button>
+
+        {onViewFilter && (
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
+            onClick={onViewFilter}
+          >
+            סינון תצוגה
+          </Button>
+        )}
 
         <div className="relative shrink-0">
           <Button
