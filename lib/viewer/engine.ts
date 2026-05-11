@@ -52,6 +52,11 @@ import {
 } from "@/lib/viewer/clipping-presets";
 import type { IsolationMode } from "@/lib/state/isolation-store";
 
+/** Orbit view axis used by camera-controls’ orthographic zoom-to-cursor math (not part of public typings). */
+type CameraControlsOrbital = CameraControls & {
+  _getCameraDirection(out: THREE.Vector3): THREE.Vector3;
+};
+
 export interface PickHit {
   localId: number;
   itemId: number;
@@ -202,6 +207,19 @@ export class ViewerEngine {
   private readonly orbitFallbackSphere = new THREE.Sphere();
   private readonly orbitFallbackPlane = new THREE.Plane();
   private orbitPivotControlStartHandler: (() => void) | null = null;
+  /**
+   * מבט orthographic: camera-controls’ built-in ortho `dollyToCursor` path is tied to smoothed `_zoom`
+   * and often never applies a visible target shift. We handle wheel on the host in capture phase
+   * (before the canvas listener) using the same unproject/lerp/pullback as the library, then block the
+   * default zoom so the view follows the pointer.
+   */
+  private orthoViewWheelCaptureHandler: ((e: WheelEvent) => void) | null = null;
+  private readonly orthoWheelWorldCursor = new THREE.Vector3();
+  private readonly orthoWheelAx = new THREE.Vector3();
+  private readonly orthoWheelCursorProj = new THREE.Vector3();
+  private readonly orthoWheelNewTarget = new THREE.Vector3();
+  private readonly orthoWheelCamDir = new THREE.Vector3();
+  private readonly orthoWheelTargetSnap = new THREE.Vector3();
 
   /** Single user clipping plane (That Open `renderer.setPlane` + fragments bridge). */
   private readonly userClipPlane = new THREE.Plane();
@@ -417,6 +435,7 @@ export class ViewerEngine {
 
     this.installPointerListeners();
     this.installPerspectiveOrbitPivotFromCursor();
+    this.installOrthoViewZoomTowardCursor();
     /* Ensure the host div (not only the canvas) never scrolls the page instead of delivering gestures. */
     this.container.style.touchAction = "none";
   }
@@ -630,6 +649,7 @@ export class ViewerEngine {
 
     this.activeOrthoViewMode = mode;
     this.attachOrthoResizeListener();
+    this.applySnappyCameraControls();
     return true;
   }
 
@@ -680,6 +700,7 @@ export class ViewerEngine {
 
     this.activeOrthoViewMode = mode;
     this.attachOrthoResizeListener();
+    this.applySnappyCameraControls();
     return true;
   }
 
@@ -881,6 +902,7 @@ export class ViewerEngine {
     void this.syncFragmentsAfterCameraSwap();
 
     this.attachOrthoResizeListener();
+    this.applySnappyCameraControls();
     return true;
   }
 
@@ -918,10 +940,9 @@ export class ViewerEngine {
     c.smoothTime = 0;
     c.draggingSmoothTime = 0;
     /**
-     * Wheel zoom uses camera-controls’ built-in cursor-relative dolly (`_dollyControlCoord` +
-     * late-update target lerp). Do **not** also call `setOrbitPoint` on every wheel: each tick would
-     * run `setOrbitPoint` → `dollyTo` + `moveTo` and then `_dollyInternal`, and async `getFullPick`
-     * would re-target late — the point under the cursor drifts.
+     * Perspective wheel dolly reads `_dollyControlCoord` when true. Orthographic מבט zoom is applied in
+     * {@link installOrthoViewZoomTowardCursor} so the pointer is fixed under the cursor; we still keep
+     * this on for middle-button / touch zoom paths inside camera-controls.
      */
     c.dollyToCursor = true;
     c.infinityDolly = false;
@@ -986,6 +1007,75 @@ export class ViewerEngine {
       this.applyOrbitPivotFromModelPickLikeTap(this.lastPointerNdc, controls);
     };
     controls.addEventListener("controlstart", this.orbitPivotControlStartHandler);
+  }
+
+  private installOrthoViewZoomTowardCursor(): void {
+    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
+    if (!canvas) return;
+
+    this.orthoViewWheelCaptureHandler = (e: WheelEvent) => {
+      if (this.disposed || this.activeOrthoViewMode === null) return;
+
+      const ctrl = this.world.camera.controls as CameraControls | undefined;
+      const cam = this.world.camera.three;
+      if (!ctrl?.enabled || !cam?.isOrthographicCamera) return;
+
+      const tn = e.target;
+      if (!(tn instanceof Node) || (tn !== canvas && !canvas.contains(tn))) return;
+
+      const ortho = cam as THREE.OrthographicCamera;
+
+      const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+      const deltaYFactor = isMac ? -1 : -3;
+      const delta =
+        e.deltaMode === 1 && !e.ctrlKey ? e.deltaY / deltaYFactor : e.deltaY / (deltaYFactor * 10);
+      const zoomScale = Math.pow(0.95, -delta * ctrl.dollySpeed);
+      if (!Number.isFinite(zoomScale)) return;
+
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const my = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      void ctrl.update(0);
+      ortho.updateMatrixWorld(true);
+
+      const prevZoom = ortho.zoom;
+      const nextZoom = THREE.MathUtils.clamp(prevZoom * zoomScale, ctrl.minZoom, ctrl.maxZoom);
+      if (Math.abs(nextZoom - prevZoom) < 1e-10) return;
+
+      const zDepth = (ortho.near + ortho.far) / (ortho.near - ortho.far);
+      this.orthoWheelWorldCursor.set(mx, my, zDepth);
+      this.orthoWheelWorldCursor.unproject(ortho);
+      this.orthoWheelAx.set(0, 0, -1).applyQuaternion(ortho.quaternion);
+      const cursor = this.orthoWheelCursorProj
+        .copy(this.orthoWheelWorldCursor)
+        .add(this.orthoWheelAx.multiplyScalar(-this.orthoWheelWorldCursor.dot(ortho.up)));
+
+      ctrl.getTarget(this.orthoWheelTargetSnap);
+      (ctrl as CameraControlsOrbital)._getCameraDirection(this.orthoWheelCamDir);
+
+      const prevPlane = this.orthoWheelTargetSnap.dot(this.orthoWheelCamDir);
+      const lerpRatio = (nextZoom - prevZoom) / nextZoom;
+      const newTarget = this.orthoWheelNewTarget
+        .copy(this.orthoWheelTargetSnap)
+        .lerp(cursor, lerpRatio);
+      const pull = newTarget.dot(this.orthoWheelCamDir) - prevPlane;
+      newTarget.sub(this.orthoWheelAx.copy(this.orthoWheelCamDir).multiplyScalar(pull));
+
+      e.preventDefault();
+      e.stopImmediatePropagation();
+
+      void ctrl.zoomTo(nextZoom, false);
+      void ctrl.moveTo(newTarget.x, newTarget.y, newTarget.z, false);
+      void ctrl.stop?.();
+      void ctrl.update(0);
+    };
+
+    this.container.addEventListener("wheel", this.orthoViewWheelCaptureHandler, {
+      capture: true,
+      passive: false,
+    });
   }
 
   /**
@@ -3214,6 +3304,10 @@ export class ViewerEngine {
    * overlay on picked. Hidden (הסתר): picked items worker-invisible; remainder uses a per-element edge
    * overlay (LOD tile wires cannot hide only some instances in a batch without full-opacity leaks).
    */
+  /**
+   * @param localIds Fragment locals to keep emphasized. For **`context`**, this set may be **empty**
+   *   to show the entire model as context ghosts until items are revealed (סינון תצוגה).
+   */
   applyIsolation(
     mode: "isolated" | "context" | "hidden",
     localIds: Set<number>,
@@ -3227,7 +3321,11 @@ export class ViewerEngine {
     localIds: Set<number>,
     options?: ApplyIsolationOptions,
   ): Promise<boolean> {
-    if (this.disposed || !this.modelId || localIds.size === 0) {
+    if (this.disposed || !this.modelId) {
+      return false;
+    }
+    /** Context with an empty set = full-model ghost (סינון תצוגה tab “reveal” mode). */
+    if (localIds.size === 0 && mode !== "context") {
       return false;
     }
     const fragments = this.components.get(OBC.FragmentsManager);
@@ -3272,11 +3370,13 @@ export class ViewerEngine {
       if (mode === "hidden") {
         this.shutdownHiddenRemainderSketchState();
       }
-      return false;
+      if (mode !== "context") {
+        return false;
+      }
     }
 
-    const isolationSeedLocals = [...selected];
-    const coreEdgeOverlayLocals = [...selected];
+    let coreEdgeOverlayLocals: number[] = [];
+
     const boltAllow = options?.boltGuidIsolationAllowlist;
     const spatialBoltAllow = options?.spatialBoltIsolationAllowlist;
     const useIfcBoltRel = !!options?.useIfcBoltSteelRelationIsolation;
@@ -3285,61 +3385,66 @@ export class ViewerEngine {
      * relation mode relies on IFC `ConnectedTo` from the isolated steel (+ injected locals) instead.
      */
     const graphBoltGuidAllowlist = useIfcBoltRel ? undefined : boltAllow;
-    await this.mergeHostedOpeningLocalIds(fragModel, selected, allIdSet);
-    if (useIfcBoltRel) {
-      await this.injectIsolationBoltsFromIfcRelationRows(
-        fragModel,
-        selected,
-        allIdSet,
-        options.relationBoltGlobalIdsRaw,
-        boltAllow,
-      );
-    }
-    /** Two hops: fasteners → washers / nested accessories rarely appear as one IFC step from the plate. */
-    await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, graphBoltGuidAllowlist);
-    await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, graphBoltGuidAllowlist);
-    if (useIfcBoltRel) {
-      /**
-       * Flange bolts are sometimes absent from fragment `ConnectedTo` from steel; padded bbox catches them.
-       * {@link pruneRelationIsolationHardwareAgainstAllowlist} strips assembly-wide pieces outside link+proximity.
-       */
-      await this.mergeFastenersNearIsolationSeeds(
-        fragModel,
-        selected,
-        isolationSeedLocals,
-        allIdSet,
-        undefined,
-      );
-    } else {
-      await this.mergeFastenersNearIsolationSeeds(
-        fragModel,
-        selected,
-        isolationSeedLocals,
-        allIdSet,
-        spatialBoltAllow,
-      );
-    }
-    await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, graphBoltGuidAllowlist);
-    if (useIfcBoltRel && boltAllow && boltAllow.size > 0) {
-      await this.pruneRelationIsolationHardwareAgainstAllowlist(
-        fragModel,
-        selected,
-        isolationSeedLocals,
-        allIdSet,
-        boltAllow,
-      );
-    }
-    if (!useIfcBoltRel) {
-      await this.pruneIsolationFastenersOutsideSteelCore(
-        fragModel,
-        selected,
-        isolationSeedLocals,
-        allIdSet,
-      );
-    }
 
-    if (mode === "hidden") {
-      this.isolationHiddenExcludedLocals = new Set(selected);
+    if (selected.size > 0) {
+      coreEdgeOverlayLocals = [...selected];
+      const isolationSeedLocals = [...selected];
+      await this.mergeHostedOpeningLocalIds(fragModel, selected, allIdSet);
+      if (useIfcBoltRel) {
+        await this.injectIsolationBoltsFromIfcRelationRows(
+          fragModel,
+          selected,
+          allIdSet,
+          options.relationBoltGlobalIdsRaw,
+          boltAllow,
+        );
+      }
+      /** Two hops: fasteners → washers / nested accessories rarely appear as one IFC step from the plate. */
+      await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, graphBoltGuidAllowlist);
+      await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, graphBoltGuidAllowlist);
+      if (useIfcBoltRel) {
+        /**
+         * Flange bolts are sometimes absent from fragment `ConnectedTo` from steel; padded bbox catches them.
+         * {@link pruneRelationIsolationHardwareAgainstAllowlist} strips assembly-wide pieces outside link+proximity.
+         */
+        await this.mergeFastenersNearIsolationSeeds(
+          fragModel,
+          selected,
+          isolationSeedLocals,
+          allIdSet,
+          undefined,
+        );
+      } else {
+        await this.mergeFastenersNearIsolationSeeds(
+          fragModel,
+          selected,
+          isolationSeedLocals,
+          allIdSet,
+          spatialBoltAllow,
+        );
+      }
+      await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, graphBoltGuidAllowlist);
+      if (useIfcBoltRel && boltAllow && boltAllow.size > 0) {
+        await this.pruneRelationIsolationHardwareAgainstAllowlist(
+          fragModel,
+          selected,
+          isolationSeedLocals,
+          allIdSet,
+          boltAllow,
+        );
+      }
+      if (!useIfcBoltRel) {
+        await this.pruneIsolationFastenersOutsideSteelCore(
+          fragModel,
+          selected,
+          isolationSeedLocals,
+          allIdSet,
+        );
+      }
+
+      if (mode === "hidden") {
+        this.isolationHiddenExcludedLocals = new Set(selected);
+      }
     }
 
     const map = this.bboxMapFromLocalSet(selected);
@@ -3352,7 +3457,7 @@ export class ViewerEngine {
       await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
       this.isolationVisualMode = "isolated";
       await this.syncFragmentsViewForced(fragments);
-      if (doFocus) {
+      if (doFocus && selected.size > 0) {
         await this.focusBboxMap(map);
         await this.syncFragmentsViewForced(fragments);
       }
@@ -3414,7 +3519,7 @@ export class ViewerEngine {
     await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
     await this.syncFragmentsViewForced(fragments);
     this.isolationVisualMode = "context";
-    if (doFocus) {
+    if (doFocus && selected.size > 0) {
       await this.focusBboxMap(map);
     }
     /**
@@ -3771,6 +3876,12 @@ export class ViewerEngine {
         this.modelObject = null;
       }
       this.removePointerListeners();
+      if (this.orthoViewWheelCaptureHandler) {
+        this.container.removeEventListener("wheel", this.orthoViewWheelCaptureHandler, {
+          capture: true,
+        });
+        this.orthoViewWheelCaptureHandler = null;
+      }
       const camCtrl = this.world.camera.controls as CameraControls | undefined;
       if (camCtrl && this.orbitPivotControlStartHandler) {
         camCtrl.removeEventListener("controlstart", this.orbitPivotControlStartHandler);

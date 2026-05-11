@@ -2,6 +2,9 @@
 
 import { create } from "zustand";
 
+/** Which סינון תצוגה tab owns the ghost-reveal picker (Eye on tab bar). */
+export type ViewFilterGhostTab = "assemblies" | "parts" | "profiles";
+
 export type ViewFilterState = {
   /** Keys from {@link assemblyGroupKey} / {@link AggregatedAssemblyRow.key} */
   hiddenAssemblyKeys: Record<string, boolean>;
@@ -14,6 +17,17 @@ export type ViewFilterState = {
    * When true (√ בורג), mechanical fasteners disappear but opening/void items stay visible (hole locations).
    */
   hideAllFastenersKeepHoles: boolean;
+  /**
+   * When set, the viewport uses **הצג בהקשר**-style ghosts for everything; revealed analyzer `part.id`
+   * strings show at full opacity. Row eyes in the table add/remove reveals (not הסתר).
+   */
+  ghostFocusTab: ViewFilterGhostTab | null;
+  ghostRevealedPartIds: Record<string, boolean>;
+  activateGhostRevealTab: (tab: ViewFilterGhostTab) => void;
+  toggleGhostRevealGroup: (partIds: readonly string[]) => void;
+  exitGhostRevealMode: () => void;
+  isGhostRevealActive: () => boolean;
+  isGhostRevealedPart: (partId: string) => boolean;
   toggleAssemblyKey: (key: string) => void;
   togglePartId: (partId: string) => void;
   togglePartTabGroupKey: (key: string) => void;
@@ -32,10 +46,37 @@ const initial = {
   hiddenPartTabGroupKeys: {} as Record<string, boolean>,
   hiddenProfileTabGroupKeys: {} as Record<string, boolean>,
   hideAllFastenersKeepHoles: false,
+  ghostFocusTab: null as ViewFilterGhostTab | null,
+  ghostRevealedPartIds: {} as Record<string, boolean>,
 };
 
 export const useViewFilterStore = create<ViewFilterState>((set, get) => ({
   ...initial,
+  activateGhostRevealTab: (tab) =>
+    set((s) => ({
+      hiddenAssemblyKeys: {},
+      hiddenPartIds: {},
+      hiddenPartTabGroupKeys: {},
+      hiddenProfileTabGroupKeys: {},
+      ghostFocusTab: tab,
+      ghostRevealedPartIds: {},
+      hideAllFastenersKeepHoles: s.hideAllFastenersKeepHoles,
+    })),
+  toggleGhostRevealGroup: (partIds) =>
+    set((s) => {
+      if (!s.ghostFocusTab) return s;
+      const next = { ...s.ghostRevealedPartIds };
+      const list = [...partIds];
+      const allOn = list.length > 0 && list.every((id) => next[id]);
+      for (const id of list) {
+        if (allOn) delete next[id];
+        else next[id] = true;
+      }
+      return { ghostRevealedPartIds: next };
+    }),
+  exitGhostRevealMode: () => set({ ghostFocusTab: null, ghostRevealedPartIds: {} }),
+  isGhostRevealActive: () => get().ghostFocusTab !== null,
+  isGhostRevealedPart: (partId) => Boolean(get().ghostRevealedPartIds[partId]),
   toggleAssemblyKey: (key) =>
     set((s) => {
       const hiddenAssemblyKeys = { ...s.hiddenAssemblyKeys };

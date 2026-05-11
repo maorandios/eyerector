@@ -8,7 +8,10 @@ import {
   aggregateAssembliesByMark,
   type AggregatedAssemblyRow,
 } from "@/lib/viewer/modelAggregates";
-import { useViewFilterStore } from "@/lib/state/view-filter-store";
+import {
+  type ViewFilterGhostTab,
+  useViewFilterStore,
+} from "@/lib/state/view-filter-store";
 import { formatCount, formatQuantityInt } from "@/lib/format-numbers";
 import {
   aggregateProfilesForModelTab,
@@ -18,7 +21,7 @@ import {
 } from "@/components/viewer/SelectionPickDetails";
 import { cn } from "@/lib/utils";
 
-type FilterTab = "assemblies" | "parts" | "profiles";
+type FilterTab = ViewFilterGhostTab;
 
 function aggregatePartsForAssemblyRow(row: AggregatedAssemblyRow): { part: AnalyzerPart; qty: number }[] {
   const m = new Map<string, { part: AnalyzerPart; qty: number }>();
@@ -32,6 +35,57 @@ function aggregatePartsForAssemblyRow(row: AggregatedAssemblyRow): { part: Analy
   }
   return Array.from(m.values()).sort((a, b) =>
     displayPartMark(a.part).localeCompare(displayPartMark(b.part), "he", { numeric: true }),
+  );
+}
+
+function TabGhostEye({
+  label,
+  active,
+  ghostOnThisTab,
+  onSelectTab,
+  onToggleGhost,
+}: {
+  label: string;
+  active: boolean;
+  ghostOnThisTab: boolean;
+  onSelectTab: () => void;
+  onToggleGhost: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 flex-1 items-stretch rounded-md border border-transparent",
+        active ? "border-zinc-600 bg-zinc-700 text-zinc-100" : "text-zinc-400",
+      )}
+    >
+      <button
+        type="button"
+        className={cn(
+          "min-w-0 flex-1 truncate rounded-l-md px-1 py-2 text-xs font-medium transition-colors",
+          !active && "hover:bg-zinc-800/80",
+        )}
+        onClick={onSelectTab}
+      >
+        {label}
+      </button>
+      <button
+        type="button"
+        className={cn(
+          "shrink-0 rounded-r-md border-r border-zinc-600 px-1 transition-colors hover:bg-zinc-600/50",
+          ghostOnThisTab ? "bg-emerald-900/70 text-emerald-200" : "text-zinc-500 hover:text-zinc-200",
+        )}
+        title="מצב רוח (כמו הצג בהקשר): לחץ שורות בטבלה כדי להציג רגיל"
+        aria-label={`מצב רוח בשונית ${label}`}
+        aria-pressed={ghostOnThisTab}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onToggleGhost();
+        }}
+      >
+        <Eye className="mx-auto h-4 w-4" />
+      </button>
+    </div>
   );
 }
 
@@ -56,6 +110,13 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
   const isPartTabGroupHidden = useViewFilterStore((s) => s.isPartTabGroupHidden);
   const isProfileTabGroupHidden = useViewFilterStore((s) => s.isProfileTabGroupHidden);
   const reset = useViewFilterStore((s) => s.reset);
+  const ghostFocusTab = useViewFilterStore((s) => s.ghostFocusTab);
+  const ghostRevealedPartIds = useViewFilterStore((s) => s.ghostRevealedPartIds);
+  const activateGhostRevealTab = useViewFilterStore((s) => s.activateGhostRevealTab);
+  const exitGhostRevealMode = useViewFilterStore((s) => s.exitGhostRevealMode);
+  const toggleGhostRevealGroup = useViewFilterStore((s) => s.toggleGhostRevealGroup);
+
+  const ghostRevealActive = ghostFocusTab !== null;
 
   const rows = useMemo(() => aggregateAssembliesByMark(assemblies), [assemblies]);
   const modelPartRows = useMemo(() => aggregateSteelPartsForModelTab(steelParts), [steelParts]);
@@ -80,36 +141,36 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
       </div>
 
       <div className="mb-2 flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
-        <button
-          type="button"
-          className={cn(
-            "flex-1 rounded-md px-2 py-2 text-xs font-medium transition-colors",
-            tab === "assemblies" ? "bg-zinc-700 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800/80",
-          )}
-          onClick={() => setTab("assemblies")}
-        >
-          הרכבות
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "flex-1 rounded-md px-2 py-2 text-xs font-medium transition-colors",
-            tab === "parts" ? "bg-zinc-700 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800/80",
-          )}
-          onClick={() => setTab("parts")}
-        >
-          חלקים
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "flex-1 rounded-md px-2 py-2 text-xs font-medium transition-colors",
-            tab === "profiles" ? "bg-zinc-700 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800/80",
-          )}
-          onClick={() => setTab("profiles")}
-        >
-          פרופילים
-        </button>
+        <TabGhostEye
+          label="הרכבות"
+          active={tab === "assemblies"}
+          ghostOnThisTab={ghostFocusTab === "assemblies"}
+          onSelectTab={() => setTab("assemblies")}
+          onToggleGhost={() => {
+            if (ghostFocusTab === "assemblies") exitGhostRevealMode();
+            else activateGhostRevealTab("assemblies");
+          }}
+        />
+        <TabGhostEye
+          label="חלקים"
+          active={tab === "parts"}
+          ghostOnThisTab={ghostFocusTab === "parts"}
+          onSelectTab={() => setTab("parts")}
+          onToggleGhost={() => {
+            if (ghostFocusTab === "parts") exitGhostRevealMode();
+            else activateGhostRevealTab("parts");
+          }}
+        />
+        <TabGhostEye
+          label="פרופילים"
+          active={tab === "profiles"}
+          ghostOnThisTab={ghostFocusTab === "profiles"}
+          onSelectTab={() => setTab("profiles")}
+          onToggleGhost={() => {
+            if (ghostFocusTab === "profiles") exitGhostRevealMode();
+            else activateGhostRevealTab("profiles");
+          }}
+        />
       </div>
 
       <div className="max-h-[calc(100vh-12rem)] overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/30 p-2">
@@ -132,6 +193,11 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                     const expanded = expandedAssemblyKey === row.key;
                     const asmH = isAssemblyHidden(row.key);
                     const partRows = aggregatePartsForAssemblyRow(row);
+                    const assemblyPartIds = partRows.map((pr) => pr.part.id);
+                    const assemblyGhostAllRevealed =
+                      ghostRevealActive &&
+                      assemblyPartIds.length > 0 &&
+                      assemblyPartIds.every((id) => ghostRevealedPartIds[id]);
 
                     return (
                       <Fragment key={row.key}>
@@ -156,14 +222,36 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             <button
                               type="button"
                               className="inline-flex rounded-md p-1.5 text-zinc-200 hover:bg-zinc-700"
-                              title={asmH ? "הצג במודל" : "הסתר במודל"}
-                              aria-label={asmH ? "הצג במודל" : "הסתר במודל"}
+                              title={
+                                ghostRevealActive
+                                  ? assemblyGhostAllRevealed
+                                    ? "החזר קבוצה למצב רוח"
+                                    : "הצג חלקי הרכבה רגילים"
+                                  : asmH
+                                    ? "הצג במודל"
+                                    : "הסתר במודל"
+                              }
+                              aria-label="תצוגה"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                toggleAssemblyKey(row.key);
+                                if (ghostRevealActive) {
+                                  toggleGhostRevealGroup(assemblyPartIds);
+                                } else {
+                                  toggleAssemblyKey(row.key);
+                                }
                               }}
                             >
-                              {asmH ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                              {ghostRevealActive ? (
+                                assemblyGhostAllRevealed ? (
+                                  <Eye className="h-4 w-4" />
+                                ) : (
+                                  <EyeOff className="h-4 w-4" />
+                                )
+                              ) : asmH ? (
+                                <EyeOff className="h-4 w-4" />
+                              ) : (
+                                <Eye className="h-4 w-4" />
+                              )}
                             </button>
                           </td>
                         </tr>
@@ -186,6 +274,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                       const parentHides = asmH;
                                       const partOnly = !parentHides && isPartHidden(part.id);
                                       const showOff = parentHides || partOnly;
+                                      const ghostRev = ghostRevealedPartIds[part.id];
 
                                       return (
                                         <tr key={part.id} className="border-t border-zinc-800/80">
@@ -196,25 +285,39 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                               type="button"
                                               className={cn(
                                                 "inline-flex rounded-md p-1.5",
-                                                parentHides
+                                                parentHides && !ghostRevealActive
                                                   ? "cursor-not-allowed text-zinc-600"
                                                   : "text-zinc-200 hover:bg-zinc-700",
                                               )}
-                                              disabled={parentHides}
+                                              disabled={parentHides && !ghostRevealActive}
                                               title={
-                                                parentHides
-                                                  ? "הרכבה מוסתרת"
-                                                  : partOnly
-                                                    ? "הצג במודל"
-                                                    : "הסתר במודל"
+                                                ghostRevealActive
+                                                  ? ghostRev
+                                                    ? "החזר למצב רוח"
+                                                    : "הצג חלק רגיל"
+                                                  : parentHides
+                                                    ? "הרכבה מוסתרת"
+                                                    : partOnly
+                                                      ? "הצג במודל"
+                                                      : "הסתר במודל"
                                               }
                                               aria-label="תצוגת חלק"
                                               onClick={(e) => {
                                                 e.stopPropagation();
+                                                if (ghostRevealActive) {
+                                                  toggleGhostRevealGroup([part.id]);
+                                                  return;
+                                                }
                                                 if (!parentHides) togglePartId(part.id);
                                               }}
                                             >
-                                              {showOff ? (
+                                              {ghostRevealActive ? (
+                                                ghostRev ? (
+                                                  <Eye className="h-3.5 w-3.5" />
+                                                ) : (
+                                                  <EyeOff className="h-3.5 w-3.5" />
+                                                )
+                                              ) : showOff ? (
                                                 <EyeOff className="h-3.5 w-3.5" />
                                               ) : (
                                                 <Eye className="h-3.5 w-3.5" />
@@ -259,6 +362,11 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                     const canExpand = row.effectiveQty > 1 || row.instances.length > 1;
                     const expanded = expandedPartRowKey === row.key;
                     const groupH = isPartTabGroupHidden(row.key);
+                    const rowPartIds = row.instances.map((p) => p.id);
+                    const partGroupGhostAllRevealed =
+                      ghostRevealActive &&
+                      rowPartIds.length > 0 &&
+                      rowPartIds.every((id) => ghostRevealedPartIds[id]);
 
                     return (
                       <Fragment key={row.key}>
@@ -292,14 +400,33 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             <button
                               type="button"
                               className="inline-flex rounded-md p-1.5 text-zinc-200 hover:bg-zinc-700"
-                              title={groupH ? "הצג במודל" : "הסתר במודל"}
-                              aria-label={groupH ? "הצג במודל" : "הסתר במודל"}
+                              title={
+                                ghostRevealActive
+                                  ? partGroupGhostAllRevealed
+                                    ? "החזר קבוצה למצב רוח"
+                                    : "הצג קבוצת חלקים רגילים"
+                                  : groupH
+                                    ? "הצג במודל"
+                                    : "הסתר במודל"
+                              }
+                              aria-label="תצוגה"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                togglePartTabGroupKey(row.key);
+                                if (ghostRevealActive) toggleGhostRevealGroup(rowPartIds);
+                                else togglePartTabGroupKey(row.key);
                               }}
                             >
-                              {groupH ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                              {ghostRevealActive ? (
+                                partGroupGhostAllRevealed ? (
+                                  <Eye className="h-4 w-4" />
+                                ) : (
+                                  <EyeOff className="h-4 w-4" />
+                                )
+                              ) : groupH ? (
+                                <EyeOff className="h-4 w-4" />
+                              ) : (
+                                <Eye className="h-4 w-4" />
+                              )}
                             </button>
                           </td>
                         </tr>
@@ -320,6 +447,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                     const parentHides = groupH;
                                     const partOnly = !parentHides && isPartHidden(part.id);
                                     const showOff = parentHides || partOnly;
+                                    const ghostRev = ghostRevealedPartIds[part.id];
                                     const subLabel =
                                       displayPartMark(part) +
                                       (part.expressId != null ? ` #${part.expressId}` : "");
@@ -341,25 +469,39 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                             type="button"
                                             className={cn(
                                               "inline-flex rounded-md p-1.5",
-                                              parentHides
+                                              parentHides && !ghostRevealActive
                                                 ? "cursor-not-allowed text-zinc-600"
                                                 : "text-zinc-200 hover:bg-zinc-700",
                                             )}
-                                            disabled={parentHides}
+                                            disabled={parentHides && !ghostRevealActive}
                                             title={
-                                              parentHides
-                                                ? "הקבוצה מוסתרת"
-                                                : partOnly
-                                                  ? "הצג במודל"
-                                                  : "הסתר במודל"
+                                              ghostRevealActive
+                                                ? ghostRev
+                                                  ? "החזר למצב רוח"
+                                                  : "הצג חלק רגיל"
+                                                : parentHides
+                                                  ? "הקבוצה מוסתרת"
+                                                  : partOnly
+                                                    ? "הצג במודל"
+                                                    : "הסתר במודל"
                                             }
                                             aria-label="תצוגת חלק"
                                             onClick={(e) => {
                                               e.stopPropagation();
+                                              if (ghostRevealActive) {
+                                                toggleGhostRevealGroup([part.id]);
+                                                return;
+                                              }
                                               if (!parentHides) togglePartId(part.id);
                                             }}
                                           >
-                                            {showOff ? (
+                                            {ghostRevealActive ? (
+                                              ghostRev ? (
+                                                <Eye className="h-3.5 w-3.5" />
+                                              ) : (
+                                                <EyeOff className="h-3.5 w-3.5" />
+                                              )
+                                            ) : showOff ? (
                                               <EyeOff className="h-3.5 w-3.5" />
                                             ) : (
                                               <Eye className="h-3.5 w-3.5" />
@@ -402,6 +544,11 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                     const canExpand = row.totalQty > 1 || row.instances.length > 1;
                     const expanded = expandedProfileRowKey === row.key;
                     const groupH = isProfileTabGroupHidden(row.key);
+                    const profPartIds = row.instances.map((p) => p.id);
+                    const profGroupGhostAllRevealed =
+                      ghostRevealActive &&
+                      profPartIds.length > 0 &&
+                      profPartIds.every((id) => ghostRevealedPartIds[id]);
 
                     return (
                       <Fragment key={row.key}>
@@ -434,14 +581,33 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             <button
                               type="button"
                               className="inline-flex rounded-md p-1.5 text-zinc-200 hover:bg-zinc-700"
-                              title={groupH ? "הצג במודל" : "הסתר במודל"}
-                              aria-label={groupH ? "הצג במודל" : "הסתר במודל"}
+                              title={
+                                ghostRevealActive
+                                  ? profGroupGhostAllRevealed
+                                    ? "החזר קבוצה למצב רוח"
+                                    : "הצג חלקים רגילים"
+                                  : groupH
+                                    ? "הצג במודל"
+                                    : "הסתר במודל"
+                              }
+                              aria-label="תצוגה"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                toggleProfileTabGroupKey(row.key);
+                                if (ghostRevealActive) toggleGhostRevealGroup(profPartIds);
+                                else toggleProfileTabGroupKey(row.key);
                               }}
                             >
-                              {groupH ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                              {ghostRevealActive ? (
+                                profGroupGhostAllRevealed ? (
+                                  <Eye className="h-4 w-4" />
+                                ) : (
+                                  <EyeOff className="h-4 w-4" />
+                                )
+                              ) : groupH ? (
+                                <EyeOff className="h-4 w-4" />
+                              ) : (
+                                <Eye className="h-4 w-4" />
+                              )}
                             </button>
                           </td>
                         </tr>
@@ -461,6 +627,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                     const parentHides = groupH;
                                     const partOnly = !parentHides && isPartHidden(part.id);
                                     const showOff = parentHides || partOnly;
+                                    const ghostRev = ghostRevealedPartIds[part.id];
                                     const subLabel =
                                       displayPartMark(part) +
                                       (part.expressId != null ? ` #${part.expressId}` : "");
@@ -481,25 +648,39 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                             type="button"
                                             className={cn(
                                               "inline-flex rounded-md p-1.5",
-                                              parentHides
+                                              parentHides && !ghostRevealActive
                                                 ? "cursor-not-allowed text-zinc-600"
                                                 : "text-zinc-200 hover:bg-zinc-700",
                                             )}
-                                            disabled={parentHides}
+                                            disabled={parentHides && !ghostRevealActive}
                                             title={
-                                              parentHides
-                                                ? "הקבוצה מוסתרת"
-                                                : partOnly
-                                                  ? "הצג במודל"
-                                                  : "הסתר במודל"
+                                              ghostRevealActive
+                                                ? ghostRev
+                                                  ? "החזר למצב רוח"
+                                                  : "הצג חלק רגיל"
+                                                : parentHides
+                                                  ? "הקבוצה מוסתרת"
+                                                  : partOnly
+                                                    ? "הצג במודל"
+                                                    : "הסתר במודל"
                                             }
                                             aria-label="תצוגת חלק"
                                             onClick={(e) => {
                                               e.stopPropagation();
+                                              if (ghostRevealActive) {
+                                                toggleGhostRevealGroup([part.id]);
+                                                return;
+                                              }
                                               if (!parentHides) togglePartId(part.id);
                                             }}
                                           >
-                                            {showOff ? (
+                                            {ghostRevealActive ? (
+                                              ghostRev ? (
+                                                <Eye className="h-3.5 w-3.5" />
+                                              ) : (
+                                                <EyeOff className="h-3.5 w-3.5" />
+                                              )
+                                            ) : showOff ? (
                                               <EyeOff className="h-3.5 w-3.5" />
                                             ) : (
                                               <Eye className="h-3.5 w-3.5" />

@@ -97,3 +97,21 @@ export async function resolveViewFilterHiddenLocals(
 
   return { structuralHidden, fastenerHidden };
 }
+
+/** Fragment locals for steel parts the user brought back to full opacity in ghost-reveal mode. */
+export async function resolveGhostRevealLocals(
+  engine: ViewerEngine,
+  analyzerData: AnalyzerOutput,
+  revealedPartIds: Record<string, boolean>,
+): Promise<number[]> {
+  const pids = Object.keys(revealedPartIds);
+  if (pids.length === 0) return [];
+  const locals = new Set<number>();
+  for (const pid of pids) {
+    const part = analyzerData.parts.find((p) => p.id === pid);
+    if (!part || isAnalyzerBoltRow(part)) continue;
+    const set = await engine.resolveIsolationLocalIds([{ id: part.id, expressId: part.expressId }]);
+    set.forEach((id) => locals.add(id));
+  }
+  return [...locals];
+}

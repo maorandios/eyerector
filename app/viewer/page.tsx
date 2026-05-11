@@ -626,6 +626,7 @@ export default function ViewerPage() {
 
     await engine.clearIsolationVisuals();
     useIsolationStore.getState().clearIsolation();
+    useViewFilterStore.getState().exitGhostRevealMode();
     await reapplyViewFilterIfNeeded(engine);
 
     engine.restoreCameraRevertSnapshot(bundle.camera);
@@ -686,6 +687,7 @@ export default function ViewerPage() {
 
   const handleIsolationShowAll = useCallback(async () => {
     if (!engine) return;
+    useViewFilterStore.getState().exitGhostRevealMode();
     await engine.clearIsolationVisuals();
     useIsolationStore.getState().clearIsolation();
     engine.setTransparency(useAppStore.getState().transparencyEnabled);
