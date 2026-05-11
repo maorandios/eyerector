@@ -995,11 +995,19 @@ export class ViewerEngine {
       if (!movesCamera) return;
 
       /**
-       * Orbit (rotate) must always use the cursor ray — same “canvas pick” as fresh gestures.
-       * A prior `pickOrbitPivotActive` from an element tap would otherwise lock rotation to that stored
-       * world point while the user is zoomed on another area (close-up, no new pick) and it feels
-       * like orbit ignores the pointer.
+       * After an element tap, keep orbit anchored to that hit until a new gesture re-seeds pivot
+       * (below). Pan/zoom/dolly stay on the same sticky orbit point without re-scanning ray each time.
        */
+      if (isRotateOnly && this.pickOrbitPivotActive) {
+        void controls.stop?.();
+        controls.setOrbitPoint(
+          this.pickOrbitPivotWorld.x,
+          this.pickOrbitPivotWorld.y,
+          this.pickOrbitPivotWorld.z,
+        );
+        void controls.update?.(0);
+        return;
+      }
       if (!isRotateOnly && this.pickOrbitPivotActive) {
         return;
       }
@@ -1120,7 +1128,7 @@ export class ViewerEngine {
     if (!this.modelObject) return null;
     try {
       const raycaster = this.components.get(OBC.Raycasters).get(this.world);
-      const hit = raycaster.castRayToObjects(this.modelObject, ndc);
+      const hit = raycaster.castRayToObjects([this.modelObject], ndc);
       if (hit?.point) return hit.point.clone();
     } catch {
       return null;

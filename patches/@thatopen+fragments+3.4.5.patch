@@ -1,0 +1,384 @@
+diff --git a/node_modules/@thatopen/fragments/dist/index.cjs b/node_modules/@thatopen/fragments/dist/index.cjs
+index 5116a8f..8f4b357 100644
+--- a/node_modules/@thatopen/fragments/dist/index.cjs
++++ b/node_modules/@thatopen/fragments/dist/index.cjs
+@@ -12279,16 +12279,27 @@ __publicField(_GeomsFbUtils, "ushortMaxValue", 65e3);
+ let GeomsFbUtils = _GeomsFbUtils;
+ class FragmentsIfcUtils {
+   static getAbsolutePlacement(webIfc, item, unitsFactor = this.getUnitsFactor(webIfc)) {
+-    const placementId = item.ObjectPlacement.value;
++    const op = item?.ObjectPlacement;
++    if (!item || !op || op.value == null) {
++      const ifcResult = new THREE__namespace.Matrix4();
++      ifcResult.identity();
++      const tempMatrix2 = new THREE__namespace.Matrix4();
++      tempMatrix2.makeRotationX(-Math.PI / 2);
++      ifcResult.premultiply(tempMatrix2);
++      return ifcResult;
++    }
++    const placementId = op.value;
+     const placement = webIfc.GetLine(0, placementId);
+     const ifcResult = new THREE__namespace.Matrix4();
+     ifcResult.identity();
+-    this.getAbsolutePlacementRecursively(
+-      webIfc,
+-      placement,
+-      ifcResult,
+-      unitsFactor
+-    );
++    if (placement) {
++      this.getAbsolutePlacementRecursively(
++        webIfc,
++        placement,
++        ifcResult,
++        unitsFactor
++      );
++    }
+     const tempMatrix2 = new THREE__namespace.Matrix4();
+     tempMatrix2.makeRotationX(-Math.PI / 2);
+     ifcResult.premultiply(tempMatrix2);
+@@ -12307,6 +12318,7 @@ class FragmentsIfcUtils {
+       const assignmentId = unitAssignmentIds.get(i);
+       const assignmentAttrs = ifcApi.GetLine(0, assignmentId);
+       for (const unitHandle of assignmentAttrs.Units) {
++        if (unitHandle == null || unitHandle.value == null) continue;
+         const unit = ifcApi.GetLine(0, unitHandle.value);
+         const value = (_a2 = unit.UnitType) == null ? void 0 : _a2.value;
+         if (value !== "LENGTHUNIT")
+@@ -12330,34 +12342,66 @@ class FragmentsIfcUtils {
+     return result;
+   }
+   static getAbsolutePlacementRecursively(webIfc, placement, result, unitsFactor) {
+-    const relativePlacementId = placement.RelativePlacement.value;
+-    const relativePlacement = webIfc.GetLine(0, relativePlacementId);
+-    const locationId = relativePlacement.Location.value;
++    if (!placement) return;
++    const relPlacementRef = placement.RelativePlacement;
++    if (!relPlacementRef || relPlacementRef.value == null) {
++      const prel = placement.PlacementRelTo;
++      if (prel && prel.value != null) {
++        const parentPlacement = webIfc.GetLine(0, prel.value);
++        if (parentPlacement) {
++          this.getAbsolutePlacementRecursively(webIfc, parentPlacement, result, unitsFactor);
++        }
++      }
++      return;
++    }
++    const relativePlacement = webIfc.GetLine(0, relPlacementRef.value);
++    if (!relativePlacement) {
++      const prel = placement.PlacementRelTo;
++      if (prel && prel.value != null) {
++        const parentPlacement = webIfc.GetLine(0, prel.value);
++        if (parentPlacement) {
++          this.getAbsolutePlacementRecursively(webIfc, parentPlacement, result, unitsFactor);
++        }
++      }
++      return;
++    }
++    const locRef = relativePlacement.Location;
++    const locationId = locRef != null && locRef.value != null ? locRef.value : null;
+     const zAxisRef = relativePlacement.Axis;
+     const xAxisRef = relativePlacement.RefDirection;
+     const pos = new THREE__namespace.Vector3(0, 0, 0);
+     const zAxis = new THREE__namespace.Vector3(0, 0, 1);
+     const xAxis = new THREE__namespace.Vector3(1, 0, 0);
+-    const locationData = webIfc.GetLine(0, locationId);
+-    if (locationData) {
++    const locationData = locationId != null ? webIfc.GetLine(0, locationId) : null;
++    if (locationData && locationData.Coordinates) {
+       const [x, y, z] = locationData.Coordinates;
+-      pos.x = x.value * unitsFactor;
+-      pos.y = y.value * unitsFactor;
+-      pos.z = z.value * unitsFactor;
++      const num = (c) =>
++        c == null ? 0 : typeof c === "number" ? c : (typeof c === "object" && c.value !== void 0 ? c.value : 0);
++      pos.x = num(x) * unitsFactor;
++      pos.y = num(y) * unitsFactor;
++      pos.z = num(z) * unitsFactor;
+     }
+-    if (zAxisRef) {
++    if (zAxisRef && zAxisRef.value != null) {
+       const zAxisData = webIfc.GetLine(0, zAxisRef.value);
+-      const [z1, z2, z3] = zAxisData.DirectionRatios.map((v) => typeof v === "number" ? v : v.value);
+-      zAxis.x = z1;
+-      zAxis.y = z2;
+-      zAxis.z = z3;
++      if (zAxisData && zAxisData.DirectionRatios) {
++        const [z1, z2, z3] = zAxisData.DirectionRatios.map(
++          (v) => v == null ? 0 : typeof v === "number" ? v : v.value ?? 0
++        );
++        zAxis.x = z1;
++        zAxis.y = z2;
++        zAxis.z = z3;
++      }
+     }
+-    if (xAxisRef) {
++    if (xAxisRef && xAxisRef.value != null) {
+       const xAxisData = webIfc.GetLine(0, xAxisRef.value);
+-      const [x1, x2, x3] = xAxisData.DirectionRatios.map((v) => typeof v === "number" ? v : v.value);
+-      xAxis.x = x1;
+-      xAxis.y = x2;
+-      xAxis.z = x3;
++      if (xAxisData && xAxisData.DirectionRatios) {
++        const [x1, x2, x3] = xAxisData.DirectionRatios.map(
++          (v) => v == null ? 0 : typeof v === "number" ? v : v.value ?? 0
++        );
++        xAxis.x = x1;
++        xAxis.y = x2;
++        xAxis.z = x3;
++      }
+     }
+     const yAxis = zAxis.clone().cross(xAxis);
+     const tempMatrix2 = new THREE__namespace.Matrix4();
+@@ -12380,10 +12424,10 @@ class FragmentsIfcUtils {
+       1
+     ]);
+     result.premultiply(tempMatrix2);
+-    if (!placement.PlacementRelTo || !placement.PlacementRelTo.value)
+-      return;
+-    const parentPlacementId = placement.PlacementRelTo.value;
+-    const parentPlacement = webIfc.GetLine(0, parentPlacementId);
++    const prelTo = placement.PlacementRelTo;
++    if (!prelTo || prelTo.value == null) return;
++    const parentPlacement = webIfc.GetLine(0, prelTo.value);
++    if (!parentPlacement) return;
+     this.getAbsolutePlacementRecursively(
+       webIfc,
+       parentPlacement,
+@@ -37243,16 +37287,28 @@ class GridReader {
+     }
+   }
+   getGridAxes(ifcGrid, webIfc, units, ifcKey) {
+-    if (!ifcGrid[ifcKey]) {
++    if (!ifcGrid || !ifcGrid[ifcKey]) {
+       return [];
+     }
+     const axisDataArr = [];
+     for (const axis of ifcGrid[ifcKey]) {
++      if (!axis || axis.value == null) continue;
+       const axisCurve = webIfc.GetLine(0, axis.value);
++      if (
++        !axisCurve ||
++        !axisCurve.AxisCurve ||
++        axisCurve.AxisCurve.value == null
++      ) {
++        continue;
++      }
+       const curveId = axisCurve.AxisCurve.value;
+       const curve = webIfc.GetLine(0, curveId);
++      if (!curve) continue;
+       const axisData = {
+-        tag: axisCurve.AxisTag.value,
++        tag:
++          axisCurve.AxisTag && axisCurve.AxisTag.value !== void 0
++            ? axisCurve.AxisTag.value
++            : "",
+         curve: []
+       };
+       if (!curve.Points) {
+@@ -37266,9 +37322,10 @@ class GridReader {
+         axisData.curve.push(x, y, z);
+       };
+       if (curve.type === WEBIFC__namespace.IFCPOLYLINE) {
+-        for (const { value: pointId } of curve.Points) {
+-          const ifcPoints = webIfc.GetLine(0, pointId);
+-          if (ifcPoints.Coordinates) {
++        for (const ptRef of curve.Points) {
++          if (!ptRef || ptRef.value == null) continue;
++          const ifcPoints = webIfc.GetLine(0, ptRef.value);
++          if (ifcPoints && ifcPoints.Coordinates) {
+             pushPoint(ifcPoints.Coordinates);
+           }
+         }
+diff --git a/node_modules/@thatopen/fragments/dist/index.mjs b/node_modules/@thatopen/fragments/dist/index.mjs
+index 22464dd..6dc834f 100644
+--- a/node_modules/@thatopen/fragments/dist/index.mjs
++++ b/node_modules/@thatopen/fragments/dist/index.mjs
+@@ -12259,16 +12259,27 @@ __publicField(_GeomsFbUtils, "ushortMaxValue", 65e3);
+ let GeomsFbUtils = _GeomsFbUtils;
+ class FragmentsIfcUtils {
+   static getAbsolutePlacement(webIfc, item, unitsFactor = this.getUnitsFactor(webIfc)) {
+-    const placementId = item.ObjectPlacement.value;
++    const op = item?.ObjectPlacement;
++    if (!item || !op || op.value == null) {
++      const ifcResult = new THREE.Matrix4();
++      ifcResult.identity();
++      const tempMatrix2 = new THREE.Matrix4();
++      tempMatrix2.makeRotationX(-Math.PI / 2);
++      ifcResult.premultiply(tempMatrix2);
++      return ifcResult;
++    }
++    const placementId = op.value;
+     const placement = webIfc.GetLine(0, placementId);
+     const ifcResult = new THREE.Matrix4();
+     ifcResult.identity();
+-    this.getAbsolutePlacementRecursively(
+-      webIfc,
+-      placement,
+-      ifcResult,
+-      unitsFactor
+-    );
++    if (placement) {
++      this.getAbsolutePlacementRecursively(
++        webIfc,
++        placement,
++        ifcResult,
++        unitsFactor
++      );
++    }
+     const tempMatrix2 = new THREE.Matrix4();
+     tempMatrix2.makeRotationX(-Math.PI / 2);
+     ifcResult.premultiply(tempMatrix2);
+@@ -12287,6 +12298,7 @@ class FragmentsIfcUtils {
+       const assignmentId = unitAssignmentIds.get(i);
+       const assignmentAttrs = ifcApi.GetLine(0, assignmentId);
+       for (const unitHandle of assignmentAttrs.Units) {
++        if (unitHandle == null || unitHandle.value == null) continue;
+         const unit = ifcApi.GetLine(0, unitHandle.value);
+         const value = (_a2 = unit.UnitType) == null ? void 0 : _a2.value;
+         if (value !== "LENGTHUNIT")
+@@ -12310,34 +12322,66 @@ class FragmentsIfcUtils {
+     return result;
+   }
+   static getAbsolutePlacementRecursively(webIfc, placement, result, unitsFactor) {
+-    const relativePlacementId = placement.RelativePlacement.value;
+-    const relativePlacement = webIfc.GetLine(0, relativePlacementId);
+-    const locationId = relativePlacement.Location.value;
++    if (!placement) return;
++    const relPlacementRef = placement.RelativePlacement;
++    if (!relPlacementRef || relPlacementRef.value == null) {
++      const prel = placement.PlacementRelTo;
++      if (prel && prel.value != null) {
++        const parentPlacement = webIfc.GetLine(0, prel.value);
++        if (parentPlacement) {
++          this.getAbsolutePlacementRecursively(webIfc, parentPlacement, result, unitsFactor);
++        }
++      }
++      return;
++    }
++    const relativePlacement = webIfc.GetLine(0, relPlacementRef.value);
++    if (!relativePlacement) {
++      const prel = placement.PlacementRelTo;
++      if (prel && prel.value != null) {
++        const parentPlacement = webIfc.GetLine(0, prel.value);
++        if (parentPlacement) {
++          this.getAbsolutePlacementRecursively(webIfc, parentPlacement, result, unitsFactor);
++        }
++      }
++      return;
++    }
++    const locRef = relativePlacement.Location;
++    const locationId = locRef != null && locRef.value != null ? locRef.value : null;
+     const zAxisRef = relativePlacement.Axis;
+     const xAxisRef = relativePlacement.RefDirection;
+     const pos = new THREE.Vector3(0, 0, 0);
+     const zAxis = new THREE.Vector3(0, 0, 1);
+     const xAxis = new THREE.Vector3(1, 0, 0);
+-    const locationData = webIfc.GetLine(0, locationId);
+-    if (locationData) {
++    const locationData = locationId != null ? webIfc.GetLine(0, locationId) : null;
++    if (locationData && locationData.Coordinates) {
+       const [x, y, z] = locationData.Coordinates;
+-      pos.x = x.value * unitsFactor;
+-      pos.y = y.value * unitsFactor;
+-      pos.z = z.value * unitsFactor;
++      const num = (c) =>
++        c == null ? 0 : typeof c === "number" ? c : (typeof c === "object" && c.value !== void 0 ? c.value : 0);
++      pos.x = num(x) * unitsFactor;
++      pos.y = num(y) * unitsFactor;
++      pos.z = num(z) * unitsFactor;
+     }
+-    if (zAxisRef) {
++    if (zAxisRef && zAxisRef.value != null) {
+       const zAxisData = webIfc.GetLine(0, zAxisRef.value);
+-      const [z1, z2, z3] = zAxisData.DirectionRatios.map((v) => typeof v === "number" ? v : v.value);
+-      zAxis.x = z1;
+-      zAxis.y = z2;
+-      zAxis.z = z3;
++      if (zAxisData && zAxisData.DirectionRatios) {
++        const [z1, z2, z3] = zAxisData.DirectionRatios.map(
++          (v) => v == null ? 0 : typeof v === "number" ? v : v.value ?? 0
++        );
++        zAxis.x = z1;
++        zAxis.y = z2;
++        zAxis.z = z3;
++      }
+     }
+-    if (xAxisRef) {
++    if (xAxisRef && xAxisRef.value != null) {
+       const xAxisData = webIfc.GetLine(0, xAxisRef.value);
+-      const [x1, x2, x3] = xAxisData.DirectionRatios.map((v) => typeof v === "number" ? v : v.value);
+-      xAxis.x = x1;
+-      xAxis.y = x2;
+-      xAxis.z = x3;
++      if (xAxisData && xAxisData.DirectionRatios) {
++        const [x1, x2, x3] = xAxisData.DirectionRatios.map(
++          (v) => v == null ? 0 : typeof v === "number" ? v : v.value ?? 0
++        );
++        xAxis.x = x1;
++        xAxis.y = x2;
++        xAxis.z = x3;
++      }
+     }
+     const yAxis = zAxis.clone().cross(xAxis);
+     const tempMatrix2 = new THREE.Matrix4();
+@@ -12360,10 +12404,10 @@ class FragmentsIfcUtils {
+       1
+     ]);
+     result.premultiply(tempMatrix2);
+-    if (!placement.PlacementRelTo || !placement.PlacementRelTo.value)
+-      return;
+-    const parentPlacementId = placement.PlacementRelTo.value;
+-    const parentPlacement = webIfc.GetLine(0, parentPlacementId);
++    const prelTo = placement.PlacementRelTo;
++    if (!prelTo || prelTo.value == null) return;
++    const parentPlacement = webIfc.GetLine(0, prelTo.value);
++    if (!parentPlacement) return;
+     this.getAbsolutePlacementRecursively(
+       webIfc,
+       parentPlacement,
+@@ -37223,16 +37267,28 @@ class GridReader {
+     }
+   }
+   getGridAxes(ifcGrid, webIfc, units, ifcKey) {
+-    if (!ifcGrid[ifcKey]) {
++    if (!ifcGrid || !ifcGrid[ifcKey]) {
+       return [];
+     }
+     const axisDataArr = [];
+     for (const axis of ifcGrid[ifcKey]) {
++      if (!axis || axis.value == null) continue;
+       const axisCurve = webIfc.GetLine(0, axis.value);
++      if (
++        !axisCurve ||
++        !axisCurve.AxisCurve ||
++        axisCurve.AxisCurve.value == null
++      ) {
++        continue;
++      }
+       const curveId = axisCurve.AxisCurve.value;
+       const curve = webIfc.GetLine(0, curveId);
++      if (!curve) continue;
+       const axisData = {
+-        tag: axisCurve.AxisTag.value,
++        tag:
++          axisCurve.AxisTag && axisCurve.AxisTag.value !== void 0
++            ? axisCurve.AxisTag.value
++            : "",
+         curve: []
+       };
+       if (!curve.Points) {
+@@ -37246,9 +37302,10 @@ class GridReader {
+         axisData.curve.push(x, y, z);
+       };
+       if (curve.type === WEBIFC.IFCPOLYLINE) {
+-        for (const { value: pointId } of curve.Points) {
+-          const ifcPoints = webIfc.GetLine(0, pointId);
+-          if (ifcPoints.Coordinates) {
++        for (const ptRef of curve.Points) {
++          if (!ptRef || ptRef.value == null) continue;
++          const ifcPoints = webIfc.GetLine(0, ptRef.value);
++          if (ifcPoints && ifcPoints.Coordinates) {
+             pushPoint(ifcPoints.Coordinates);
+           }
+         }

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@thatopen/components": "^3.4.5",
@@ -24,6 +25,7 @@
     "zustand": "^5.0.13"
   },
   "devDependencies": {
+    "patch-package": "^8.0.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
