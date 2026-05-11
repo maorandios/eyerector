@@ -55,8 +55,8 @@ export const SELECTION_HIGHLIGHT_COLOR = new THREE.Color(0x2542ff);
 /** Main-thread context overlay clones in "הצג בהקשר" — must match {@link ViewerEngine} snapshot name; sketch edges skip these. */
 export const CONTEXT_GHOST_SNAPSHOT_NAME = "eyeSteel-context-ghost-snapshot";
 
-/** Context (non-isolated) faces + matching sketch-edge opacity in "הצג בהקשר". */
-export const CONTEXT_GHOST_FACE_OPACITY = 0.05;
+/** Context (non-isolated) faces + matching sketch-edge opacity in "הצג בהקשר" (~2%). */
+export const CONTEXT_GHOST_FACE_OPACITY = 0.02;
 
 /**
  * Slight luma lift + translucency reads as a soft glow against the shaded model without extra passes.

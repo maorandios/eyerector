@@ -149,12 +149,17 @@ export class ViewerEngine {
   private downPos: { x: number; y: number; t: number; pointerType: string } | null = null;
   private pickCallback: ((hit: PickHit | null) => void) | null = null;
   /**
-   * Last successful model-tap hit point (world). Orbit keeps this pivot until a miss tap, a
-   * programmatic camera move, or dispose — avoids rotate-start `getPointAt` choosing a different
-   * surface when the camera is far from the selection.
+   * World point the camera orbits/trucks/dollies around — same source of truth for (1) element tap
+   * picks and (2) canvas gestures: both use {@link OBC.FastModelPickers#getFullPick} when available.
+   * Cleared on miss tap, programmatic camera moves, fit/reset (see {@link clearStoredPickOrbitPivot}).
    */
   private pickOrbitPivotActive = false;
   private readonly pickOrbitPivotWorld = new THREE.Vector3();
+  /**
+   * ~0.75× loaded model world diagonal — scales truck/dolly vs orbit radius so pan/zoom stay usable
+   * when zoomed far out on large IFCs (see {@link syncPerspectiveOrbitLimitsClipAndSensitivity}).
+   */
+  private cameraSensitivityRefDistance = 25;
   private fragmentCameraHooksInstalled = false;
   /** `FragmentsManager.list` is only valid after {@link OBC.FragmentsManager.init}. */
   private fragmentsClippingListenersInstalled = false;
@@ -187,6 +192,18 @@ export class ViewerEngine {
   private viewerLightIntensityBackup: number[] | null = null;
   private readonly tmpVecEye = new THREE.Vector3();
   private readonly tmpClipNormal = new THREE.Vector3();
+  /** Cursor-based orbit pivot for pan/dolly/wheel (see {@link installPerspectiveOrbitPivotFromCursor}). */
+  private readonly orbitPivotRaycaster = new THREE.Raycaster();
+  private readonly wheelNdcForOrbit = new THREE.Vector2();
+  private readonly orbitPivotScratchCenter = new THREE.Vector3();
+  private readonly orbitPivotScratchSize = new THREE.Vector3();
+  private readonly orbitPivotScratchHit = new THREE.Vector3();
+  private readonly orbitPivotScratchToHit = new THREE.Vector3();
+  private readonly orbitPivotScratchViewDir = new THREE.Vector3();
+  private readonly orbitFallbackSphere = new THREE.Sphere();
+  private readonly orbitFallbackPlane = new THREE.Plane();
+  private orbitPivotControlStartHandler: (() => void) | null = null;
+  private orbitPivotWheelHandler: ((e: WheelEvent) => void) | null = null;
 
   /** Single user clipping plane (That Open `renderer.setPlane` + fragments bridge). */
   private readonly userClipPlane = new THREE.Plane();
@@ -244,6 +261,96 @@ export class ViewerEngine {
     this.pickOrbitPivotActive = false;
   }
 
+  private refreshCameraSensitivityRefFromModel(): void {
+    if (!this.modelObject) {
+      this.cameraSensitivityRefDistance = 25;
+      return;
+    }
+    const box = new THREE.Box3().setFromObject(this.modelObject);
+    if (box.isEmpty()) {
+      this.cameraSensitivityRefDistance = 25;
+      return;
+    }
+    const span = box.getSize(new THREE.Vector3()).length();
+    this.cameraSensitivityRefDistance = Math.max(8, span * 0.75);
+  }
+
+  /**
+   * Each frame: clamp orbit radius (prevents float blow-up + unusable pan/zoom), keep far/near
+   * in a depth-friendly ratio, and scale truck/dolly. Without a max orbit distance, zoom-out can
+   * push `distance` so high that depth buffer + picks break and איפוס מבט cannot recover cleanly.
+   */
+  private syncPerspectiveOrbitLimitsClipAndSensitivity(): void {
+    if (this.disposed || !this.modelObject || this.activeOrthoViewMode !== null) return;
+    const cam = this.world.camera.three;
+    if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) return;
+    const persp = cam as THREE.PerspectiveCamera;
+    const ctrl = this.world.camera.controls as CameraControls | null | undefined;
+    if (!ctrl) return;
+
+    const box = new THREE.Box3().setFromObject(this.modelObject);
+    if (box.isEmpty()) return;
+    const span = box.getSize(new THREE.Vector3()).length();
+    const ref = Math.max(1, this.cameraSensitivityRefDistance);
+    /** Hard cap ~tens of km — enough for site-scale IFC without breaking GPU depth precision. */
+    const maxD = Math.min(180_000, Math.max(ref * 38, span * 45, 250));
+
+    let d = ctrl.distance;
+    if (!Number.isFinite(d) || d <= 0 || d > 1e12) {
+      const sph = box.getBoundingSphere(new THREE.Sphere());
+      const r = Math.max(sph.radius, span * 0.25, 1);
+      this.frameCameraIsoDiagonal(sph.center, r);
+      void ctrl.stop?.();
+      void ctrl.update?.(0);
+      d = ctrl.distance;
+    } else if (d > maxD) {
+      ctrl.dollyTo(maxD, false);
+      void ctrl.stop?.();
+      void ctrl.update?.(0);
+      d = maxD;
+    }
+
+    ctrl.maxDistance = maxD * 1.02;
+
+    const far = Math.min(600_000, Math.max(d * 2.6 + span * 6, span * 14, 25_000));
+    const ratioCap = 120_000;
+    let near = 0.01;
+    if (far / near > ratioCap) near = far / ratioCap;
+    near = Math.max(0.01, Math.min(near, Math.max(d * 0.15, 0.01)));
+
+    const prevFar = persp.far;
+    const prevNear = persp.near;
+    if (
+      Math.abs(far - prevFar) / Math.max(prevFar, 1) > 0.008 ||
+      Math.abs(near - prevNear) > 1e-6
+    ) {
+      persp.near = near;
+      persp.far = far;
+      persp.updateProjectionMatrix();
+    }
+
+    /**
+     * Gentle log ramps when orbit radius ≫ model ref. Softer bases than stock (2 / 1).
+     * When zoomed in (small d vs ref), ease truck + wheel dolly so focus-pull doesn’t jump.
+     */
+    const ratio = Math.max(1, Math.min(d / ref, 4096));
+    const truckGain = Math.min(1.1, 1 + 0.05 * Math.log2(ratio));
+    const dollyGain = Math.min(1.08, 1 + 0.03 * Math.log2(ratio));
+    const truckBase = 1.12;
+    const dollyBase = 0.52;
+    const closeT = Math.min(1, d / Math.max(ref * 0.32, 1e-6));
+    const truckCloseFactor = 0.42 + 0.58 * Math.pow(closeT, 0.9);
+    const dollyCloseFactor = 0.28 + 0.72 * Math.pow(closeT, 1.1);
+    let truck = truckBase * truckGain * truckCloseFactor;
+    let dolly = dollyBase * dollyGain * dollyCloseFactor;
+    /**
+     * Without a model pick, pan truck re-projects the target every gesture — feels harsher than
+     * “sticky hit” mode. Ease truck + wheel dolly only for canvas work; selection path unchanged.
+     */
+    ctrl.truckSpeed = truck;
+    ctrl.dollySpeed = dolly;
+  }
+
   constructor(container: HTMLDivElement) {
     this.container = container;
     this.components = new OBC.Components();
@@ -275,7 +382,6 @@ export class ViewerEngine {
     if (ctrl0) this.applyPerspectiveNavigationBindings(ctrl0);
     this.applyPerspectiveClipPlanes();
     this.installFragmentCameraSyncOnce();
-    this.installOrbitPivotOnRotateStart();
 
     this.measurementController.attach(this.world);
 
@@ -313,6 +419,7 @@ export class ViewerEngine {
     });
 
     this.installPointerListeners();
+    this.installPerspectiveOrbitPivotFromCursor();
     /* Ensure the host div (not only the canvas) never scrolls the page instead of delivering gestures. */
     this.container.style.touchAction = "none";
   }
@@ -329,9 +436,10 @@ export class ViewerEngine {
     if (modelRoot) {
       const box = new THREE.Box3().setFromObject(modelRoot);
       const span = box.getSize(new THREE.Vector3()).length();
-      persp.far = Math.max(5e4, span * 100, 1e6);
+      /** Baseline; {@link syncPerspectiveOrbitLimitsClipAndSensitivity} refines each frame. */
+      persp.far = Math.max(20_000, span * 30, 60_000);
     } else {
-      persp.far = 1e6;
+      persp.far = 400_000;
     }
     persp.updateProjectionMatrix();
   }
@@ -410,6 +518,17 @@ export class ViewerEngine {
     ctrl.touches.one = A.TOUCH_SCREEN_PAN;
     ctrl.touches.two = A.TOUCH_ZOOM_TRUCK;
     ctrl.touches.three = A.TOUCH_TRUCK;
+  }
+
+  /**
+   * `camera-controls` keeps one `_zoom` for the active camera. Orthographic zoom must not stay on
+   * {@link THREE.PerspectiveCamera.zoom} after מצב בדיקה / ortho מבט — it blows out the projection
+   * (extreme wide / fish-eye).
+   */
+  private resetPerspectiveZoomForControls(ctrl: CameraControls): void {
+    this.perspectiveCamera.zoom = 1;
+    this.perspectiveCamera.updateProjectionMatrix();
+    void ctrl.zoomTo(1, false);
   }
 
   private attachOrthoResizeListener() {
@@ -529,7 +648,6 @@ export class ViewerEngine {
     const box = new THREE.Box3().setFromObject(this.modelObject);
     if (box.isEmpty()) return false;
     this.clearStoredPickOrbitPivot();
-
     const size = box.getSize(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z, 1);
     const distance = ORTHO_DISTANCE_K * span;
@@ -601,7 +719,6 @@ export class ViewerEngine {
 
     if (!ctrl) return;
     this.clearStoredPickOrbitPivot();
-
     if (snapshot.orthoMode !== null) {
       this.detachOrthoResizeListener();
       const ortho = this.orthographicCamera;
@@ -622,12 +739,14 @@ export class ViewerEngine {
       simpleCam.three = this.perspectiveCamera;
       ctrl.camera = this.perspectiveCamera;
       this.applyPerspectiveNavigationBindings(ctrl);
+      this.resetPerspectiveZoomForControls(ctrl);
       this.perspectiveCamera.up.copy(up);
       this.world.scene.three.up.copy(up);
       ctrl.updateCameraUp();
       ctrl.setLookAt(pos.x, pos.y, pos.z, tgt.x, tgt.y, tgt.z, false);
       this.boundUseCamera?.(this.perspectiveCamera);
     }
+    this.applySnappyCameraControls();
     /**
      * Do not call `CameraControls#setOrbitPoint` before `setLookAt` here: after swapping
      * ortho ↔ perspective it runs against a stale camera matrix and corrupts target/offset; the
@@ -781,6 +900,7 @@ export class ViewerEngine {
     if (ctrl) {
       ctrl.camera = this.perspectiveCamera;
       this.applyPerspectiveNavigationBindings(ctrl);
+      this.resetPerspectiveZoomForControls(ctrl);
     }
 
     this.perspectiveCamera.up.set(0, 1, 0);
@@ -790,6 +910,7 @@ export class ViewerEngine {
     this.boundUseCamera?.(this.perspectiveCamera);
     this.syncFragmentsAfterCameraSwap();
 
+    this.applySnappyCameraControls();
     if (this.modelObject) this.fitAllPerspective();
   }
 
@@ -800,31 +921,63 @@ export class ViewerEngine {
     c.smoothTime = 0;
     c.draggingSmoothTime = 0;
     /**
-     * Defaults are minDistance=6 + infinityDolly=true so dollying inside minDistance pushes the orbit target —
-     * the pivot slides away from the steel you framed and orbit feels broken.
+     * ThatOpen SimpleCamera defaults: `dollyToCursor=true`, `infinityDolly=true`, `minDistance=6`.
+     * With large models, dolly-to-cursor scales target shifts by `radius * tan(fov/2)` — wheel zoom then
+     * barely moves the eye along the view ray (or feels “stuck”) until the target is panned elsewhere.
      */
-    c.minDistance = 0.05;
+    c.dollyToCursor = false;
     c.infinityDolly = false;
+    c.minDistance = 0.05;
+    /** {@link syncPerspectiveOrbitLimitsClipAndSensitivity} sets a finite cap once the model exists. */
+    c.maxDistance = Infinity;
+    /** Baselines; {@link syncPerspectiveOrbitLimitsClipAndSensitivity} applies distance + close-in easing. */
+    c.truckSpeed = 1.12;
+    c.dollySpeed = 0.52;
   }
 
   /**
-   * Rotate: in perspective, reuse the last model-tap world point as orbit pivot when set; otherwise
-   * pick the surface under the cursor at gesture start (legacy behavior).
+   * Canvas orbit/pan/zoom uses the same pivot contract as an element tap: {@link applyOrbitPivotFromModelPickLikeTap}
+   * seeds {@link pickOrbitPivotWorld} via {@link OBC.FastModelPickers#getFullPick} (plus sync ray fallback).
    */
-  private installOrbitPivotOnRotateStart() {
-    const controls = this.world.camera.controls;
-    if (!controls) return;
-    const onRotateStart = () => {
-      const action = controls.currentAction;
+  private installPerspectiveOrbitPivotFromCursor() {
+    const controls = this.world.camera.controls as CameraControls | undefined;
+    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
+    if (!controls || !canvas) return;
+
+    this.orbitPivotControlStartHandler = () => {
+      if (this.disposed || this.activeOrthoViewMode !== null) return;
+      const cam = this.world.camera.three;
+      if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) return;
+
       const A = CameraControls.ACTION;
-      const isRotate =
+      const action = controls.currentAction;
+      if (action === A.NONE) return;
+
+      const isRotateOnly =
         action === A.ROTATE ||
         action === A.TOUCH_ROTATE ||
         action === A.TOUCH_DOLLY_ROTATE ||
         action === A.TOUCH_ZOOM_ROTATE;
-      if (!isRotate) return;
-      if (this.disposed) return;
-      if (this.pickOrbitPivotActive && this.activeOrthoViewMode === null) {
+      const movesCamera =
+        isRotateOnly ||
+        (action & A.TRUCK) === A.TRUCK ||
+        (action & A.SCREEN_PAN) === A.SCREEN_PAN ||
+        (action & A.DOLLY) === A.DOLLY ||
+        (action & A.TOUCH_TRUCK) === A.TOUCH_TRUCK ||
+        (action & A.TOUCH_SCREEN_PAN) === A.TOUCH_SCREEN_PAN ||
+        (action & A.TOUCH_DOLLY) === A.TOUCH_DOLLY ||
+        (action & A.TOUCH_DOLLY_TRUCK) === A.TOUCH_DOLLY_TRUCK ||
+        (action & A.TOUCH_DOLLY_SCREEN_PAN) === A.TOUCH_DOLLY_SCREEN_PAN ||
+        (action & A.TOUCH_DOLLY_OFFSET) === A.TOUCH_DOLLY_OFFSET ||
+        (action & A.TOUCH_DOLLY_ROTATE) === A.TOUCH_DOLLY_ROTATE ||
+        (action & A.TOUCH_ZOOM_TRUCK) === A.TOUCH_ZOOM_TRUCK ||
+        (action & A.TOUCH_ZOOM_SCREEN_PAN) === A.TOUCH_ZOOM_SCREEN_PAN ||
+        (action & A.TOUCH_ZOOM_OFFSET) === A.TOUCH_ZOOM_OFFSET ||
+        (action & A.TOUCH_ZOOM_ROTATE) === A.TOUCH_ZOOM_ROTATE;
+      if (!movesCamera) return;
+
+      if (isRotateOnly && this.pickOrbitPivotActive) {
+        void controls.stop?.();
         controls.setOrbitPoint(
           this.pickOrbitPivotWorld.x,
           this.pickOrbitPivotWorld.y,
@@ -833,20 +986,152 @@ export class ViewerEngine {
         void controls.update?.(0);
         return;
       }
-      const fragments = this.components.get(OBC.FragmentsManager);
-      if (!fragments.initialized) return;
-      void (async () => {
-        try {
-          const pickers = this.components.get(OBC.FastModelPickers);
-          const picker = pickers.get(this.world);
-          const pt = await picker.getPointAt(this.lastPointerNdc.clone());
-          if (pt && !this.disposed) controls.setOrbitPoint(pt.x, pt.y, pt.z);
-        } catch {
-          /* picker GPU passes may fail transiently */
-        }
-      })();
+
+      if (!isRotateOnly && this.pickOrbitPivotActive) {
+        return;
+      }
+
+      this.applyOrbitPivotFromModelPickLikeTap(this.lastPointerNdc, controls);
     };
-    controls.addEventListener("controlstart", onRotateStart);
+    controls.addEventListener("controlstart", this.orbitPivotControlStartHandler);
+
+    this.orbitPivotWheelHandler = (e: WheelEvent) => {
+      if (this.disposed || this.activeOrthoViewMode !== null) return;
+      if (this.pickOrbitPivotActive) return;
+      const c = this.world.camera.three;
+      if (!c || !(c as THREE.PerspectiveCamera).isPerspectiveCamera) return;
+      if (!controls.enabled) return;
+      if (e.target !== canvas && !canvas.contains(e.target as Node)) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      this.wheelNdcForOrbit.set(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      this.applyOrbitPivotFromModelPickLikeTap(this.wheelNdcForOrbit, controls);
+    };
+    canvas.addEventListener("wheel", this.orbitPivotWheelHandler, { capture: true, passive: true });
+  }
+
+  /**
+   * Same camera anchor as a tap on steel: sync ray fallback immediately, then {@link OBC.FastModelPickers#getFullPick}
+   * to set {@link pickOrbitPivotWorld} / {@link pickOrbitPivotActive} (no selection callback).
+   */
+  private applyOrbitPivotFromModelPickLikeTap(ndc: THREE.Vector2, controls: CameraControls): void {
+    const pSync = this.worldOrbitPointFromPerspectiveNdc(ndc.clone());
+    this.pickOrbitPivotWorld.copy(pSync);
+    this.pickOrbitPivotActive = true;
+    void controls.stop?.();
+    controls.setOrbitPoint(pSync.x, pSync.y, pSync.z);
+    void controls.update?.(0);
+
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (!fragments.initialized) return;
+    const ndcCopy = ndc.clone();
+    void (async () => {
+      try {
+        const pickers = this.components.get(OBC.FastModelPickers);
+        const picker = pickers.get(this.world);
+        const full = await picker.getFullPick(ndcCopy);
+        if (this.disposed) return;
+        if (full && typeof full.localId === "number") {
+          this.pickOrbitPivotWorld.copy(full.point);
+          void controls.stop?.();
+          controls.setOrbitPoint(full.point.x, full.point.y, full.point.z);
+          void controls.update?.(0);
+        }
+      } catch {
+        /* fragment GPU pick may fail transiently — keep pSync */
+      }
+    })();
+  }
+
+  /**
+   * Same coarse ray path as measurement — hits fragment/LOD surfaces synchronously so canvas
+   * orbit/zoom pivot matches a model tap without waiting on GPU `getPointAt`.
+   */
+  private tryWorldPointFromThatOpenRaycast(ndc: THREE.Vector2): THREE.Vector3 | null {
+    if (!this.modelObject) return null;
+    try {
+      const raycaster = this.components.get(OBC.Raycasters).get(this.world);
+      const hit = raycaster.castRayToObjects(this.modelObject, ndc);
+      if (hit?.point) return hit.point.clone();
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /** Meshes whose `position` buffer exists on CPU — avoids fragment tiles that throw in BVH raycast. */
+  private collectMeshesWithCpuPosition(root: THREE.Object3D): THREE.Mesh[] {
+    const meshes: THREE.Mesh[] = [];
+    root.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (!m.isMesh || !m.visible) return;
+      const g = m.geometry as THREE.BufferGeometry | undefined;
+      const pos = g?.attributes?.position;
+      if (!pos || pos.count < 3) return;
+      if (!pos.array || pos.array.length === 0) return;
+      meshes.push(m);
+    });
+    return meshes;
+  }
+
+  /**
+   * World point on the cursor ray for {@link CameraControls#setOrbitPoint} — same depth idea as
+   * a model tap: ray vs mesh, else bounding sphere / plane through model center, else along the ray.
+   */
+  private worldOrbitPointFromPerspectiveNdc(ndc: THREE.Vector2): THREE.Vector3 {
+    const cam = this.world.camera.three;
+    const ctrl = this.world.camera.controls as CameraControls | undefined;
+    if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
+      return new THREE.Vector3();
+    }
+    const persp = cam as THREE.PerspectiveCamera;
+    this.orbitPivotRaycaster.setFromCamera(ndc, persp);
+    const ray = this.orbitPivotRaycaster.ray;
+
+    if (this.modelObject) {
+      const thatOpenPt = this.tryWorldPointFromThatOpenRaycast(ndc);
+      if (thatOpenPt) return thatOpenPt;
+      try {
+        const targets = this.collectMeshesWithCpuPosition(this.modelObject);
+        if (targets.length > 0) {
+          const hits = this.orbitPivotRaycaster.intersectObjects(targets, false);
+          if (hits.length > 0) return hits[0].point.clone();
+        }
+      } catch {
+        /* BVH / attribute edge cases on individual meshes */
+      }
+      const box = new THREE.Box3().setFromObject(this.modelObject);
+      if (!box.isEmpty()) {
+        box.getCenter(this.orbitPivotScratchCenter);
+        const span = box.getSize(this.orbitPivotScratchSize).length();
+        box.getBoundingSphere(this.orbitFallbackSphere);
+        if (ray.intersectSphere(this.orbitFallbackSphere, this.orbitPivotScratchHit)) {
+          this.orbitPivotScratchToHit.subVectors(this.orbitPivotScratchHit, ray.origin);
+          if (ray.direction.dot(this.orbitPivotScratchToHit) > 0) {
+            return this.orbitPivotScratchHit.clone();
+          }
+        }
+        persp.getWorldDirection(this.orbitPivotScratchViewDir);
+        this.orbitFallbackPlane.setFromNormalAndCoplanarPoint(
+          this.orbitPivotScratchViewDir,
+          this.orbitPivotScratchCenter,
+        );
+        if (ray.intersectPlane(this.orbitFallbackPlane, this.orbitPivotScratchHit)) {
+          this.orbitPivotScratchToHit.subVectors(this.orbitPivotScratchHit, ray.origin);
+          if (ray.direction.dot(this.orbitPivotScratchToHit) > 1e-6) {
+            return this.orbitPivotScratchHit.clone();
+          }
+        }
+        const d0 =
+          ctrl && Number.isFinite(ctrl.distance) ? ctrl.distance : Math.max(8, span * 0.35);
+        return ray.at(Math.max(1, d0), new THREE.Vector3());
+      }
+    }
+    const d1 = ctrl && Number.isFinite(ctrl.distance) && ctrl.distance > 0 ? ctrl.distance : 25;
+    return ray.at(d1, new THREE.Vector3());
   }
 
   /**
@@ -884,8 +1169,10 @@ export class ViewerEngine {
     const dist = Math.max(radius * 1.55, 8);
     const dir = new THREE.Vector3(1, 1, 1).normalize();
     const eye = center.clone().addScaledVector(dir, dist);
-    ctrl?.setOrbitPoint(center.x, center.y, center.z);
     ctrl?.setLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, false);
+    ctrl?.setFocalOffset(0, 0, 0, false);
+    void ctrl?.stop?.();
+    void ctrl?.update?.(0);
   }
 
   private installFragmentCameraSyncOnce() {
@@ -897,6 +1184,7 @@ export class ViewerEngine {
       void fragments.core.update(true);
     });
     cameraComp.controls?.addEventListener("update", () => {
+      this.syncPerspectiveOrbitLimitsClipAndSensitivity();
       const fragments = this.components.get(OBC.FragmentsManager);
       if (!fragments.initialized) return;
       /* Default `core.update()` caps work at ~4ms; leftover tile batches look like flicker/reverts after isolation. */
@@ -1354,6 +1642,7 @@ export class ViewerEngine {
     this.modelId = casted.modelId;
     this.analyzerGuidKeyToFragmentLocal.clear();
     this.world.scene.three.add(casted.object);
+    this.refreshCameraSensitivityRefFromModel();
 
     this.boundUseCamera = casted.useCamera.bind(casted);
     const cam = this.world.camera.three as THREE.PerspectiveCamera;
@@ -1693,6 +1982,7 @@ export class ViewerEngine {
           this.pickOrbitPivotActive = true;
           const c = this.world.camera.controls;
           if (c) {
+            void (c as CameraControls).stop?.();
             c.setOrbitPoint(full.point.x, full.point.y, full.point.z);
             void c.update?.(0);
           }
@@ -3400,9 +3690,21 @@ export class ViewerEngine {
       return;
     }
     if (this.modelObject) {
+      this.applyPerspectiveClipPlanes(this.modelObject);
       const box = new THREE.Box3().setFromObject(this.modelObject);
       const sphere = box.getBoundingSphere(new THREE.Sphere());
       this.frameCameraIsoDiagonal(sphere.center, sphere.radius);
+      const ctrl = this.world.camera.controls;
+      if (ctrl) {
+        void (ctrl as CameraControls).stop?.();
+        ctrl.setFocalOffset(0, 0, 0, false);
+        void ctrl.update?.(0);
+        void ctrl.update?.(1 / 60);
+      }
+      this.applySnappyCameraControls();
+      this.syncPerspectiveOrbitLimitsClipAndSensitivity();
+      this.boundUseCamera?.(this.world.camera.three as THREE.PerspectiveCamera);
+      void this.syncFragmentsAfterCameraSwap();
       return;
     }
     const cam = this.world.camera.three as THREE.PerspectiveCamera;
@@ -3424,6 +3726,7 @@ export class ViewerEngine {
 
   dispose() {
     if (this.disposed) return;
+    this.cameraSensitivityRefDistance = 25;
     this.clearStoredPickOrbitPivot();
     this.clearInspectionVisualizationSession();
     this.shutdownHiddenRemainderSketchState();
@@ -3453,6 +3756,7 @@ export class ViewerEngine {
         if (ctrl) {
           ctrl.camera = this.perspectiveCamera;
           this.applyPerspectiveNavigationBindings(ctrl);
+          this.resetPerspectiveZoomForControls(ctrl);
         }
         this.perspectiveCamera.up.set(0, 1, 0);
         (this.world.scene.three as THREE.Scene).up.set(0, 1, 0);
@@ -3487,6 +3791,16 @@ export class ViewerEngine {
         this.modelObject = null;
       }
       this.removePointerListeners();
+      const canvasEl = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
+      const camCtrl = this.world.camera.controls as CameraControls | undefined;
+      if (camCtrl && this.orbitPivotControlStartHandler) {
+        camCtrl.removeEventListener("controlstart", this.orbitPivotControlStartHandler);
+        this.orbitPivotControlStartHandler = null;
+      }
+      if (canvasEl && this.orbitPivotWheelHandler) {
+        canvasEl.removeEventListener("wheel", this.orbitPivotWheelHandler, { capture: true });
+        this.orbitPivotWheelHandler = null;
+      }
       this.world.renderer?.dispose();
       this.world.camera.controls?.dispose();
     } catch {

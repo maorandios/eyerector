@@ -13,7 +13,7 @@ import {
   CLIPPING_LABELS_HE,
   type ClippingDirectionId,
 } from "@/lib/viewer/clipping-presets";
-import { Search } from "lucide-react";
+import { RotateCcw, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type SelectionMode = "part" | "assembly";
@@ -47,6 +47,8 @@ interface Props {
   onMarkupDrawingToggle?: () => void;
   onMarkupDrawingClear?: () => void;
   onSnapshot?: () => void;
+  /** איזומטריה ראשונית כמו בטעינת הקובץ */
+  onResetView?: () => void;
 }
 
 /**
@@ -80,6 +82,7 @@ export function ViewerBottomDock({
   onMarkupDrawingToggle,
   onMarkupDrawingClear,
   onSnapshot,
+  onResetView,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -147,6 +150,19 @@ export function ViewerBottomDock({
         >
           דאשבורד
         </Button>
+
+        {onResetView && (
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-10 shrink-0 gap-1.5 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
+            title="איפוס מבט לאיזומטריה הראשונית של המודל"
+            onClick={onResetView}
+          >
+            <RotateCcw className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
+            איפוס מבט
+          </Button>
+        )}
 
         {onGlobalSearch && (
           <Button

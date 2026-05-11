@@ -270,6 +270,13 @@ export default function ViewerPage() {
     useClippingStore.getState().setClipSectionOrthoActive(false);
   }, [engine, clearViewModeStore]);
 
+  const handleResetView = useCallback(() => {
+    if (!engine || loadingState !== "ready") return;
+    engine.resetView();
+    clearViewModeStore();
+    useClippingStore.getState().setClipSectionOrthoActive(false);
+  }, [engine, loadingState, clearViewModeStore]);
+
   const handlePickClippingDirection = useCallback(
     (dir: ClippingDirectionId) => {
       if (!engine) return;
@@ -1332,6 +1339,7 @@ export default function ViewerPage() {
           loadingState === "ready" && analyzerData ? () => setGlobalSearchOpen(true) : undefined
         }
         onSnapshot={loadingState === "ready" ? () => void handleViewSnapshot() : undefined}
+        onResetView={loadingState === "ready" ? handleResetView : undefined}
         measurementActive={viewerTool === "measurement"}
         onMeasurementToggle={toggleMeasurementTool}
         onMeasurementClear={() => engine?.clearMeasurements()}
