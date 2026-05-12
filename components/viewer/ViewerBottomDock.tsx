@@ -498,9 +498,8 @@ export function ViewerBottomDock({
         {onToggleHideFastenersKeepHoles && (
           <DockPillButton
             label="ברגים"
-            className={cn(
-              hideFastenersKeepHoles && "bg-amber-500/12 hover:bg-amber-500/20",
-            )}
+            submenuOpen={hideFastenersKeepHoles}
+            labelClassName={hideFastenersKeepHoles ? "text-zinc-100" : undefined}
             aria-pressed={hideFastenersKeepHoles}
             title="כבוי: הצג מהדקים ובורגים. מופעל: הסתר רכיבי הידוק מהתצוגה ושמור על מיקום חריצים ופתחים"
             aria-label="ברגים"

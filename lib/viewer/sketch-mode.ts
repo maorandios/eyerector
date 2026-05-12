@@ -125,6 +125,55 @@ function applyContextSketchWireLodOpacity(wireMat: THREE.Material): void {
   }
 }
 
+/** When שרטוט mode is active, all mesh sketch strokes use this dark gray instead of IFC face hues. */
+export const SKETCH_MODE_TECHNICAL_STROKE = new THREE.Color(0x52525b);
+
+const SKETCH_UNIFIED_ORIG_MAT_UD = "eyeSteelSketchUnifiedOrigMat";
+
+/**
+ * LOD instanced sketch wires read this each frame instead of darkened IFC `lodColor` when non-null.
+ * Cleared when exiting technical sketch mode so edges match faces again outside שרטוט.
+ */
+let sketchUnifiedLodStrokeColor: THREE.Color | null = null;
+
+/** Enable/disable IFC-face-independent LOD wire color (technical drawing). */
+export function setTechnicalSketchUnifiedStroke(enabled: boolean): void {
+  sketchUnifiedLodStrokeColor = enabled ? SKETCH_MODE_TECHNICAL_STROKE : null;
+}
+
+/** Replace sketch `LineSegments` materials with a shared stroke mat; stash originals under userData. */
+export function swapSketchLineSegmentsToUnifiedMaterial(
+  root: THREE.Object3D,
+  unified: THREE.LineBasicMaterial,
+): void {
+  root.traverse((obj) => {
+    for (const ch of obj.children) {
+      if (ch.name !== SKETCH_EDGE_CHILD_NAME) continue;
+      const ls = ch as THREE.LineSegments;
+      const ud = ls.userData as Record<string, unknown>;
+      if (ud[SKETCH_UNIFIED_ORIG_MAT_UD] || ls.material === unified) continue;
+      ud[SKETCH_UNIFIED_ORIG_MAT_UD] = ls.material;
+      ls.material = unified;
+    }
+  });
+}
+
+/** Restore pooled / per-element line materials saved by {@link swapSketchLineSegmentsToUnifiedMaterial}. */
+export function restoreSketchLineSegmentsUnifiedMaterialSwap(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    for (const ch of obj.children) {
+      if (ch.name !== SKETCH_EDGE_CHILD_NAME) continue;
+      const ls = ch as THREE.LineSegments;
+      const ud = ls.userData as Record<string, unknown>;
+      const orig = ud[SKETCH_UNIFIED_ORIG_MAT_UD] as THREE.Material | THREE.Material[] | undefined;
+      if (orig !== undefined) {
+        ls.material = orig;
+        delete ud[SKETCH_UNIFIED_ORIG_MAT_UD];
+      }
+    }
+  });
+}
+
 /** IFC / fragment face tint → edge line: same hue, linear darken (see {@link edgeLineColorFromFace}). */
 const EDGE_LINE_DARKEN = 0.48;
 
@@ -188,6 +237,11 @@ function createEdgeLineMaterial(lineRgb: THREE.Color): THREE.LineBasicMaterial {
     polygonOffsetFactor: 1,
     polygonOffsetUnits: 1,
   });
+}
+
+/** Shared dark-gray stroke line for שרטוט mode (technical drawing — not IFC face hues). */
+export function createTechnicalSketchLineBasicMaterial(): THREE.LineBasicMaterial {
+  return createEdgeLineMaterial(SKETCH_MODE_TECHNICAL_STROKE);
 }
 
 function getOrCreateEdgeLineMaterial(
@@ -275,7 +329,11 @@ function syncLodSketchWireframeFromSource(dst: THREE.Material, src: THREE.Materi
   const d = dst as LodLikeMaterial;
   const s = src as LodLikeMaterial;
   d.lodSize.copy(s.lodSize);
-  d.lodColor.copy(edgeLineColorFromFace(s.lodColor));
+  if (sketchUnifiedLodStrokeColor) {
+    d.lodColor.copy(sketchUnifiedLodStrokeColor);
+  } else {
+    d.lodColor.copy(edgeLineColorFromFace(s.lodColor));
+  }
 }
 
 function createSketchWireframeMaterial(lineColor: THREE.Color): THREE.MeshBasicMaterial {
@@ -292,10 +350,16 @@ function cloneSketchInstancedOverlayMaterial(source: THREE.Material): THREE.Mate
     const c = source.clone() as LodLikeMaterial;
     c.wireframe = true;
     c.lodOpacity = 1;
-    c.lodColor.copy(edgeLineColorFromFace((source as LodLikeMaterial).lodColor));
+    if (sketchUnifiedLodStrokeColor) {
+      c.lodColor.copy(sketchUnifiedLodStrokeColor);
+    } else {
+      c.lodColor.copy(edgeLineColorFromFace((source as LodLikeMaterial).lodColor));
+    }
     return c;
   }
-  const lineCol = edgeLineColorFromFace(baseFaceColorFromMaterial(source));
+  const lineCol = sketchUnifiedLodStrokeColor
+    ? sketchUnifiedLodStrokeColor.clone()
+    : edgeLineColorFromFace(baseFaceColorFromMaterial(source));
   return createSketchWireframeMaterial(lineCol);
 }
 

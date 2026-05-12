@@ -21,12 +21,16 @@ import {
 import {
   attachSketchEdges,
   createSketchFillMaterial,
+  createTechnicalSketchLineBasicMaterial,
   ensureSketchEdgesAttached,
   isLodFragmentMaterial,
+  restoreSketchLineSegmentsUnifiedMaterialSwap,
   restoreSelectionTintOnSketchLineSegments,
   setContextIsolationEdgeOpacity,
+  setTechnicalSketchUnifiedStroke,
   setSketchEdgeVisibility,
   stripSketchEdgeChildren,
+  swapSketchLineSegmentsToUnifiedMaterial,
 } from "@/lib/viewer/sketch-mode";
 import {
   VIEW_FILTER_EDGE_OVERLAY_NAME,
@@ -234,6 +238,8 @@ export class ViewerEngine {
   private sketchFillMaterial: THREE.MeshBasicMaterial | null = null;
   /** Key = edge line color hex (darkened IFC face); reused so palette-sized models don’t allocate one material per mesh. */
   private readonly sketchEdgeMaterialPool = new Map<number, THREE.LineBasicMaterial>();
+  /** When שרטוט mode is on, plain-mesh sketch edges share this instead of IFC-tint strokes. */
+  private unifiedSketchStrokeMaterial: THREE.LineBasicMaterial | null = null;
   private readonly sketchMaterialBackup = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
   /** Fragments {@link LodMaterial} instances — restore `lodOpacity` when exiting sketch. */
   private readonly sketchLodOpacityBackup = new Map<THREE.Material, number>();
@@ -1303,6 +1309,10 @@ export class ViewerEngine {
   }
 
   private disposeSketchEdgeMaterialPool() {
+    if (this.modelObject) restoreSketchLineSegmentsUnifiedMaterialSwap(this.modelObject);
+    setTechnicalSketchUnifiedStroke(false);
+    this.unifiedSketchStrokeMaterial?.dispose();
+    this.unifiedSketchStrokeMaterial = null;
     for (const m of this.sketchEdgeMaterialPool.values()) m.dispose();
     this.sketchEdgeMaterialPool.clear();
   }
@@ -1561,8 +1571,17 @@ export class ViewerEngine {
         }
       });
 
+      setTechnicalSketchUnifiedStroke(true);
+      if (!this.unifiedSketchStrokeMaterial) {
+        this.unifiedSketchStrokeMaterial = createTechnicalSketchLineBasicMaterial();
+      }
+      swapSketchLineSegmentsToUnifiedMaterial(this.modelObject, this.unifiedSketchStrokeMaterial);
+
       this.syncSketchEdgeVisibilityToIsolationState();
     } else {
+      setTechnicalSketchUnifiedStroke(false);
+      restoreSketchLineSegmentsUnifiedMaterialSwap(this.modelObject);
+
       for (const [mat, opacity] of this.sketchLodOpacityBackup) {
         (mat as THREE.Material & { lodOpacity: number }).lodOpacity = opacity;
       }
@@ -1585,7 +1604,7 @@ export class ViewerEngine {
     if (fragments.initialized) void fragments.core.update(true);
   }
 
-  /** Sketch: transparent LOD faces + element-colored edges (face ×0.48). Default: solid shading + same edges. */
+  /** Sketch: transparent LOD faces + technical dark-gray strokes; off: solid shading + IFC-tinted edge cache restored. */
   setSketchMode(enabled: boolean): void {
     if (this.disposed) return;
     if (this.sketchModeEnabled === enabled) return;
