@@ -1,5 +1,6 @@
 "use client";
 
+import type { ComponentProps, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
@@ -9,14 +10,115 @@ import {
   type ViewModeId,
 } from "@/lib/viewer/view-mode-presets";
 import {
+  DockSubmenuBar,
+  DockSubmenuDotSep,
+  DockSubmenuPill,
+} from "@/components/viewer/dock-submenu";
+import { ClippingHudRow } from "@/components/viewer/ClippingHudRow";
+import {
   CLIPPING_DIRECTION_ORDER,
   CLIPPING_LABELS_HE,
   type ClippingDirectionId,
+  type ViewerClippingUiSnapshot,
 } from "@/lib/viewer/clipping-presets";
-import { RotateCcw, Search } from "lucide-react";
+import {
+  ArrowDownToLine,
+  ArrowLeftToLine,
+  ArrowRightToLine,
+  ArrowUpToLine,
+  Binoculars,
+  Blend,
+  Bolt,
+  Camera,
+  Check,
+  CircleX,
+  FoldHorizontal,
+  Frame,
+  Funnel,
+  Fullscreen,
+  LayoutList,
+  ListTree,
+  Pencil,
+  RulerDimensionLine,
+  Search,
+  SquaresIntersect,
+  SquaresUnite,
+  Trash2,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type SelectionMode = "part" | "assembly";
+
+const dockLabelClass =
+  "max-w-[3.625rem] text-center text-[9px] font-medium leading-tight tracking-tight text-zinc-400 sm:max-w-[4.375rem] sm:text-[11px]";
+
+const dockMainIconActive = "[&_svg]:text-[#009DFF]";
+
+/** Ghost tile: icon + Hebrew label, no outline (outer menu pill provides chrome). */
+function DockPillButton({
+  label,
+  children,
+  className,
+  labelClassName,
+  submenuOpen,
+  ...props
+}: {
+  label: string;
+  children: ReactNode;
+  submenuOpen?: boolean;
+  labelClassName?: string;
+} & ComponentProps<typeof Button>) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="default"
+      className={cn(
+        "h-auto min-h-0 w-[3.875rem] shrink-0 flex-col gap-1 rounded-full border-0 bg-transparent px-0.5 py-1.5 font-normal tracking-normal text-zinc-100 shadow-none ring-0 outline-none outline-offset-0 sm:w-[4.5rem] sm:gap-1 sm:px-1 sm:py-2",
+        "hover:bg-zinc-800/35 hover:outline-none active:scale-[0.99] disabled:pointer-events-none disabled:opacity-40 [&_svg]:shrink-0",
+        "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950",
+        className,
+      )}
+      {...props}
+    >
+      <span
+        data-slot="icon-row"
+        className={cn(
+          "flex min-h-[1.35rem] items-center justify-center gap-0.5 [&_svg]:size-[1.25rem] sm:[&_svg]:size-[1.35rem]",
+          submenuOpen && dockMainIconActive,
+        )}
+      >
+        {children}
+      </span>
+      <span className={cn(dockLabelClass, labelClassName)}>{label}</span>
+    </Button>
+  );
+}
+
+function ViewPresetIcon({
+  mode,
+  iconClassName,
+}: {
+  mode: ViewModeId;
+  /** Merged onto each lucide glyph (e.g. active color). */
+  iconClassName?: string;
+}) {
+  const sz = cn("size-[1.05rem] shrink-0 sm:size-[1.15rem]", iconClassName);
+  switch (mode) {
+    case "left":
+      return <ArrowLeftToLine className={sz} aria-hidden />;
+    case "right":
+      return <ArrowRightToLine className={sz} aria-hidden />;
+    case "top":
+      return <ArrowUpToLine className={sz} aria-hidden />;
+    case "bottom":
+      return <ArrowDownToLine className={sz} aria-hidden />;
+    case "front":
+      return <ArrowLeftToLine className={cn(sz, "rotate-90")} aria-hidden />;
+    case "back":
+      return <ArrowLeftToLine className={cn(sz, "-rotate-90")} aria-hidden />;
+  }
+}
 
 interface Props {
   selectionMode: SelectionMode;
@@ -32,6 +134,21 @@ interface Props {
   onMeasurementClear: () => void;
   onMeasurementFinish: () => void;
   onApplyViewMode: (mode: ViewModeId) => void;
+  /** Current orthographic preset (for sub-menu highlight); omit when not in a preset. */
+  activeViewMode?: ViewModeId;
+  /** Applied orthographic view: shows cancel banner in same sub-menu column as picker. */
+  appliedViewMode?: ViewModeId;
+  onExitAppliedView?: () => void;
+  /** Active clipping plane: main dock shows `חתך: …`. Cancel lives in clipping HUD pill. */
+  appliedClippingDirection?: ClippingDirectionId;
+  /** When clipping is on, anchored in this dock column (same gap-5 as other submenus). */
+  clippingHud?: {
+    snapshot: ViewerClippingUiSnapshot;
+    onDepthChange: (value: number) => void;
+    onFlip: () => void;
+    onSectionViewToggle: () => void;
+    onCancel: () => void;
+  };
   viewModeDisabled?: boolean;
   sketchModeActive: boolean;
   onSketchToggle: () => void;
@@ -67,6 +184,11 @@ export function ViewerBottomDock({
   onMeasurementClear,
   onMeasurementFinish,
   onApplyViewMode,
+  activeViewMode,
+  appliedViewMode,
+  onExitAppliedView,
+  appliedClippingDirection,
+  clippingHud,
   viewModeDisabled = false,
   sketchModeActive,
   onSketchToggle,
@@ -131,215 +253,277 @@ export function ViewerBottomDock({
   return (
     <div
       ref={wrapRef}
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-50 flex justify-center p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-50 flex flex-col items-center gap-5 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
     >
+      {appliedViewMode && onExitAppliedView && !viewOpen && (
+        <div className="pointer-events-auto shrink-0">
+          <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
+            <Button
+              type="button"
+              variant="ghost"
+              aria-label="בטל מבט"
+              title="בטל מבט"
+              onClick={onExitAppliedView}
+              className={cn(
+                "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
+                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+              )}
+            >
+              <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
+                <CircleX className="size-[1.05rem] shrink-0 sm:size-[1.15rem]" aria-hidden />
+              </span>
+            </Button>
+          </DockSubmenuBar>
+        </div>
+      )}
+      {viewOpen && !viewModeDisabled && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-label="בחירת מבט"
+          className="pointer-events-auto shrink-0"
+        >
+          <DockSubmenuBar className="w-fit px-2 sm:px-2.5">
+            {VIEW_MODE_ORDER.map((id) => (
+              <DockSubmenuPill
+                key={id}
+                label={VIEW_MODE_LABELS_HE[id]}
+                title={VIEW_MODE_LABELS_HE[id]}
+                selected={activeViewMode === id}
+                aria-label={VIEW_MODE_LABELS_HE[id]}
+                className="min-w-[3.5rem] w-auto shrink-0 sm:min-w-[3.85rem]"
+                onClick={() => pickViewMode(id)}
+              >
+                <ViewPresetIcon mode={id} />
+              </DockSubmenuPill>
+            ))}
+          </DockSubmenuBar>
+        </div>
+      )}
+      {clipOpen && !clippingDisabled && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-label="בחירת כיוון חתך"
+          className="pointer-events-auto shrink-0"
+        >
+          <DockSubmenuBar className="w-fit px-2 sm:px-2.5">
+            {CLIPPING_DIRECTION_ORDER.map((id) => (
+              <DockSubmenuPill
+                key={id}
+                label={CLIPPING_LABELS_HE[id]}
+                title={CLIPPING_LABELS_HE[id]}
+                selected={appliedClippingDirection === id}
+                aria-label={CLIPPING_LABELS_HE[id]}
+                className="min-w-[3.5rem] w-auto shrink-0 sm:min-w-[3.85rem]"
+                onClick={() => pickClippingDirection(id)}
+              >
+                <ViewPresetIcon mode={id} />
+              </DockSubmenuPill>
+            ))}
+          </DockSubmenuBar>
+        </div>
+      )}
+      {elementOpen && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-label="בחירת פריט או אסמבלי"
+          className="pointer-events-auto shrink-0"
+        >
+          <DockSubmenuBar>
+            <DockSubmenuPill
+              label="חלק"
+              title="חלק (ברירת מחדל)"
+              selected={selectionMode === "part"}
+              aria-label="חלק"
+              onClick={() => pickElementMode("part")}
+            >
+              <SquaresIntersect aria-hidden />
+            </DockSubmenuPill>
+            <DockSubmenuPill
+              label="אסמבלי"
+              title="אסמבלי"
+              selected={selectionMode === "assembly"}
+              aria-label="אסמבלי"
+              onClick={() => pickElementMode("assembly")}
+            >
+              <SquaresUnite aria-hidden />
+            </DockSubmenuPill>
+          </DockSubmenuBar>
+        </div>
+      )}
+      {clippingHud?.snapshot.active && clippingHud.snapshot.labelHe ? (
+        <div
+          className="pointer-events-auto flex w-full shrink-0 justify-center"
+          role="region"
+          aria-label="כלי קליפינג פעיל"
+        >
+          <ClippingHudRow {...clippingHud} />
+        </div>
+      ) : null}
       <div
         className={cn(
-          "pointer-events-auto flex items-center gap-1 rounded-2xl border border-zinc-600 bg-zinc-950/95 px-2 py-2 shadow-2xl backdrop-blur-sm transition-[width] duration-200",
-          measurementActive || markupDrawingActive || markupDrawingHasInk
-            ? "max-w-[min(100vw-1rem,36rem)]"
-            : "max-w-[min(100vw-1rem,32rem)]",
+          "pointer-events-auto flex max-w-[min(100vw-1rem,92rem)] flex-nowrap items-center justify-center gap-x-0 overflow-visible rounded-full border border-zinc-600/90 bg-zinc-950/95 px-1 py-1.5 shadow-2xl backdrop-blur-md sm:gap-x-px sm:px-2 sm:py-2",
         )}
         dir="rtl"
       >
-        <Button
-          type="button"
-          variant="secondary"
-          className="h-10 shrink-0 px-3 text-sm font-semibold"
-          onClick={onDashboard}
-        >
-          דאשבורד
-        </Button>
-
-        {onResetView && (
-          <Button
-            type="button"
-            variant="secondary"
-            className="h-10 shrink-0 gap-1.5 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
-            title="איפוס מבט לאיזומטריה הראשונית של המודל"
-            onClick={onResetView}
-          >
-            <RotateCcw className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
-            איפוס מבט
-          </Button>
-        )}
-
         {onGlobalSearch && (
-          <Button
-            type="button"
-            variant="secondary"
-            className="h-10 shrink-0 gap-1.5 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
-            title="חיפוש במודל"
-            onClick={onGlobalSearch}
-          >
-            <Search className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
-            חיפוש
-          </Button>
+          <DockPillButton label="חיפוש" title="חיפוש במודל" aria-label="חיפוש" onClick={onGlobalSearch}>
+            <Search aria-hidden />
+          </DockPillButton>
         )}
 
-        {onSnapshot && (
-          <Button
-            type="button"
-            variant="secondary"
-            className="h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
-            title="צילום התצוגה (ללא תפריטים)"
-            onClick={() => onSnapshot()}
-          >
-            צילום
-          </Button>
-        )}
+        <DockPillButton label="דאשבורד" title="דאשבורד" aria-label="דאשבורד" onClick={onDashboard}>
+          <LayoutList aria-hidden />
+        </DockPillButton>
 
         {onViewFilter && (
-          <Button
-            type="button"
-            variant="secondary"
-            className="h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
-            onClick={onViewFilter}
-          >
-            סינון תצוגה
-          </Button>
+          <DockPillButton label="סינון" title="סינון תצוגה" aria-label="סינון" onClick={onViewFilter}>
+            <Funnel aria-hidden />
+          </DockPillButton>
         )}
 
+        {onResetView && (
+          <DockPillButton
+            label="איפוס"
+            title="איפוס מבט לאיזומטריה הראשונית של המודל"
+            aria-label="איפוס מבט"
+            onClick={onResetView}
+          >
+            <Fullscreen aria-hidden />
+          </DockPillButton>
+        )}
+
+        <DockPillButton
+          label={selectionMode === "part" ? "חלק" : "אסמבלי"}
+          aria-expanded={elementOpen}
+          submenuOpen={elementOpen}
+          title={
+            selectionMode === "part"
+              ? "בחירת אלמנט — חלק (ברירת מחדל). לחץ לפתיחת תפריט לבחירת אסמבלי"
+              : "בחירת אלמנט — אסמבלי. לחץ לפתיחת תפריט לבחירת חלק"
+          }
+          aria-label={selectionMode === "part" ? "אלמנט: חלק" : "אלמנט: אסמבלי"}
+          onClick={() => {
+            setViewOpen(false);
+            setClipOpen(false);
+            setElementOpen((o) => !o);
+          }}
+        >
+          {selectionMode === "part" ? (
+            <SquaresIntersect aria-hidden />
+          ) : (
+            <SquaresUnite aria-hidden />
+          )}
+        </DockPillButton>
+
+        <DockPillButton
+          label={
+            activeViewMode && !viewModeDisabled
+              ? `מבט: ${VIEW_MODE_LABELS_HE[activeViewMode]}`
+              : "מבט"
+          }
+          aria-expanded={viewOpen}
+          disabled={viewModeDisabled}
+          submenuOpen={!viewModeDisabled && (viewOpen || Boolean(activeViewMode))}
+          title={
+            activeViewMode && !viewModeDisabled
+              ? `מבט — ${VIEW_MODE_LABELS_HE[activeViewMode]}. לחץ לפתיחת בחירת מבט`
+              : "מבטים מוכנים"
+          }
+          aria-label={
+            activeViewMode && !viewModeDisabled
+              ? `מבט: ${VIEW_MODE_LABELS_HE[activeViewMode]}`
+              : "מבט"
+          }
+          labelClassName={
+            activeViewMode && !viewModeDisabled ? "max-w-[5.85rem] text-zinc-100 sm:max-w-[7rem]" : undefined
+          }
+          className={
+            activeViewMode && !viewModeDisabled ? "min-w-[4.125rem] w-[5rem] px-1 sm:w-[6rem] sm:min-w-[4.75rem]" : undefined
+          }
+          onClick={() => {
+            if (viewModeDisabled) return;
+            setElementOpen(false);
+            setClipOpen(false);
+            setViewOpen((o) => !o);
+          }}
+        >
+          <Binoculars aria-hidden />
+        </DockPillButton>
+
+        <DockPillButton
+          label={
+            appliedClippingDirection && !clippingDisabled
+              ? `חתך: ${CLIPPING_LABELS_HE[appliedClippingDirection]}`
+              : "חתך"
+          }
+          aria-expanded={clipOpen}
+          disabled={clippingDisabled}
+          submenuOpen={
+            !clippingDisabled && (clipOpen || Boolean(appliedClippingDirection))
+          }
+          title={
+            appliedClippingDirection && !clippingDisabled
+              ? `חתך — ${CLIPPING_LABELS_HE[appliedClippingDirection]}. לחץ לפתיחת בחירת כיוון`
+              : "חתך / קליפינג"
+          }
+          aria-label={
+            appliedClippingDirection && !clippingDisabled
+              ? `חתך: ${CLIPPING_LABELS_HE[appliedClippingDirection]}`
+              : "חתך"
+          }
+          labelClassName={
+            appliedClippingDirection && !clippingDisabled
+              ? "max-w-[5.85rem] text-zinc-100 sm:max-w-[7rem]"
+              : undefined
+          }
+          className={
+            appliedClippingDirection && !clippingDisabled
+              ? "min-w-[4.125rem] w-[5rem] px-1 sm:w-[6rem] sm:min-w-[4.75rem]"
+              : undefined
+          }
+          onClick={() => {
+            if (clippingDisabled) return;
+            setElementOpen(false);
+            setViewOpen(false);
+            setClipOpen((o) => !o);
+          }}
+        >
+          <FoldHorizontal aria-hidden />
+        </DockPillButton>
+
         {onToggleHideFastenersKeepHoles && (
-          <Button
-            type="button"
-            variant={hideFastenersKeepHoles ? "default" : "secondary"}
+          <DockPillButton
+            label="ברגים"
             className={cn(
-              "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
-              hideFastenersKeepHoles &&
-                "ring-2 ring-amber-400/80 ring-offset-2 ring-offset-zinc-950",
+              hideFastenersKeepHoles && "bg-amber-500/12 hover:bg-amber-500/20",
             )}
             aria-pressed={hideFastenersKeepHoles}
             title="כבוי: הצג מהדקים ובורגים. מופעל: הסתר רכיבי הידוק מהתצוגה ושמור על מיקום חריצים ופתחים"
+            aria-label="ברגים"
             onClick={onToggleHideFastenersKeepHoles}
           >
-            בורג
-          </Button>
+            <Bolt aria-hidden />
+          </DockPillButton>
         )}
 
-        <div className="relative shrink-0">
-          <Button
-            type="button"
-            variant="secondary"
-            className="h-10 gap-1 px-3 text-sm font-semibold"
-            aria-expanded={elementOpen}
-            onClick={() => setElementOpen((o) => !o)}
-          >
-            אלמנט
-            <span className="text-xs opacity-80">{elementOpen ? "▼" : "▲"}</span>
-          </Button>
-          {elementOpen && (
-            <div
-              className="absolute bottom-[calc(100%+6px)] left-1/2 z-50 flex min-w-[10rem] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-zinc-600 bg-zinc-950 shadow-xl"
-              dir="rtl"
-            >
-              <button
-                type="button"
-                className={cn(
-                  "px-4 py-3 text-right text-sm font-medium transition-colors hover:bg-zinc-800",
-                  selectionMode === "assembly" ? "bg-blue-600/25 text-blue-200" : "text-zinc-200",
-                )}
-                onClick={() => pickElementMode("assembly")}
-              >
-                Assembly
-              </button>
-              <button
-                type="button"
-                className={cn(
-                  "border-t border-zinc-700 px-4 py-3 text-right text-sm font-medium transition-colors hover:bg-zinc-800",
-                  selectionMode === "part" ? "bg-blue-600/25 text-blue-200" : "text-zinc-200",
-                )}
-                onClick={() => pickElementMode("part")}
-              >
-                חלק (Part)
-              </button>
-            </div>
-          )}
-        </div>
-
-        <div className="relative shrink-0">
-          <Button
-            type="button"
-            variant="secondary"
-            className="h-10 gap-1 px-3 text-sm font-semibold disabled:opacity-40"
-            aria-expanded={viewOpen}
-            disabled={viewModeDisabled}
-            onClick={() => !viewModeDisabled && setViewOpen((o) => !o)}
-          >
-            מבט
-            <span className="text-xs opacity-80">{viewOpen ? "▼" : "▲"}</span>
-          </Button>
-          {viewOpen && !viewModeDisabled && (
-            <div
-              className="absolute bottom-[calc(100%+6px)] left-1/2 z-50 grid w-[11rem] max-w-[min(11rem,calc(100vw-2rem))] -translate-x-1/2 grid-cols-2 gap-px overflow-hidden rounded-xl border border-zinc-600 bg-zinc-800 p-1 shadow-xl"
-              dir="rtl"
-            >
-              {VIEW_MODE_ORDER.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="rounded-lg bg-zinc-900 px-3 py-2.5 text-center text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700"
-                  onClick={() => pickViewMode(id)}
-                >
-                  {VIEW_MODE_LABELS_HE[id]}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="relative shrink-0">
-          <Button
-            type="button"
-            variant="secondary"
-            className="h-10 gap-1 px-3 text-sm font-semibold disabled:opacity-40"
-            aria-expanded={clipOpen}
-            disabled={clippingDisabled}
-            onClick={() => !clippingDisabled && setClipOpen((o) => !o)}
-          >
-            קליפינג
-            <span className="text-xs opacity-80">{clipOpen ? "▼" : "▲"}</span>
-          </Button>
-          {clipOpen && !clippingDisabled && (
-            <div
-              className="absolute bottom-[calc(100%+6px)] left-1/2 z-50 grid w-[11rem] max-w-[min(11rem,calc(100vw-2rem))] -translate-x-1/2 grid-cols-2 gap-px overflow-hidden rounded-xl border border-zinc-600 bg-zinc-800 p-1 shadow-xl"
-              dir="rtl"
-            >
-              {CLIPPING_DIRECTION_ORDER.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="rounded-lg bg-zinc-900 px-3 py-2.5 text-center text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700"
-                  onClick={() => pickClippingDirection(id)}
-                >
-                  {CLIPPING_LABELS_HE[id]}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <Button
-          type="button"
-          variant={sketchModeActive ? "default" : "secondary"}
-          className={cn(
-            "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
-            sketchModeActive && "ring-2 ring-zinc-400/90 ring-offset-2 ring-offset-zinc-950",
-          )}
+        <DockPillButton
+          label="שרטוט"
           aria-pressed={sketchModeActive}
           disabled={sketchDisabled}
+          title="מצב סקיצה ושרטוט"
+          aria-label="שרטוט"
+          className={cn(sketchModeActive && "bg-white/[0.07] hover:bg-white/12")}
           onClick={onSketchToggle}
         >
-          מצב סקיצה
-        </Button>
+          <Frame aria-hidden />
+        </DockPillButton>
 
-        <Button
-          type="button"
-          variant={multiSelectActive ? "default" : "secondary"}
-          className={cn(
-            "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
-            multiSelectActive && "ring-2 ring-sky-400/80 ring-offset-2 ring-offset-zinc-950",
-          )}
+        <DockPillButton
+          label="בחירה מרובה"
           aria-pressed={multiSelectActive}
           disabled={multiSelectEnterDisabled || measurementActive || markupDrawingActive}
           title={
@@ -347,85 +531,99 @@ export function ViewerBottomDock({
               ? "צא ממדידה כדי להפעיל בחירה מרובה"
               : markupDrawingActive
                 ? "צא ממצב ציור כדי להפעיל בחירה מרובה"
-                : undefined
+                : "בחירה מרובה"
           }
+          aria-label="בחירה מרובה"
+          className={cn(multiSelectActive && "bg-sky-500/12 hover:bg-sky-500/20")}
           onClick={() => onMultiSelectEnter?.()}
         >
-          בחירה מרובה
-        </Button>
+          <Blend aria-hidden />
+        </DockPillButton>
 
         {onMarkupDrawingToggle && (
-          <Button
-            type="button"
-            variant={markupDrawingActive ? "default" : "secondary"}
-            className={cn(
-              "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
-              markupDrawingActive && "ring-2 ring-red-500/80 ring-offset-2 ring-offset-zinc-950",
-            )}
+          <DockPillButton
+            label="סימון"
             aria-pressed={markupDrawingActive}
             disabled={markupDrawingDisabled}
             title={
               markupDrawingDisabled
                 ? "אינו זמין במדידה או לפני טעינת המודל"
-                : "ציור על המסך — אדום"
+                : "סימון וציור על המסך"
             }
+            aria-label="סימון"
+            className={cn(markupDrawingActive && "bg-red-500/12 hover:bg-red-500/20")}
             onClick={onMarkupDrawingToggle}
           >
-            ציור
-          </Button>
+            <Pencil aria-hidden />
+          </DockPillButton>
         )}
 
-        <Button
-          type="button"
-          variant={measurementActive ? "default" : "secondary"}
-          className={cn(
-            "h-10 shrink-0 px-3 text-sm font-semibold",
-            measurementActive && "ring-2 ring-amber-400/80 ring-offset-2 ring-offset-zinc-950",
-          )}
+        <DockPillButton
+          label="מדידה"
           aria-pressed={measurementActive}
+          title="מדידה"
+          aria-label="מדידה"
+          className={cn(measurementActive && "bg-amber-500/12 hover:bg-amber-500/20")}
           onClick={onMeasurementToggle}
         >
-          מדידה
-        </Button>
+          <RulerDimensionLine aria-hidden />
+        </DockPillButton>
+
+        {onSnapshot && (
+          <DockPillButton
+            label="צילום מסך"
+            title="צילום התצוגה (ללא תפריטים)"
+            aria-label="צילום מסך"
+            onClick={() => onSnapshot()}
+          >
+            <Camera aria-hidden />
+          </DockPillButton>
+        )}
 
         {(markupDrawingActive || markupDrawingHasInk) && onMarkupDrawingClear && (
-          <Button
-            type="button"
-            variant="ghost"
-            className="h-10 shrink-0 px-2 text-xs text-zinc-300"
+          <DockPillButton
+            label="נקה סימון"
+            title="נקה ציור"
+            aria-label="נקה סימון"
+            className="text-zinc-400 hover:bg-zinc-800/30 hover:text-zinc-200"
             onClick={onMarkupDrawingClear}
           >
-            נקה
-          </Button>
+            <Trash2 aria-hidden />
+          </DockPillButton>
         )}
 
         {measurementActive && (
           <>
-            <Button
-              type="button"
-              variant={measurementDetailsOpen ? "default" : "secondary"}
-              className="h-10 shrink-0 px-2.5 text-xs font-semibold sm:text-sm"
+            <DockPillButton
+              label="פרטי מדידות"
               aria-pressed={measurementDetailsOpen}
+              title="פרטי מדידות"
+              aria-label="פרטי מדידות"
+              className={cn(
+                measurementDetailsOpen && "bg-blue-500/12 hover:bg-blue-500/22",
+              )}
               onClick={() => toggleMeasurementDetailsPanel()}
             >
-              פירוק מידות
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-10 shrink-0 px-2 text-xs text-zinc-300"
+              <ListTree aria-hidden />
+            </DockPillButton>
+            <DockPillButton
+              label="נקה מדידות"
+              title="נקה מדידות"
+              aria-label="נקה מדידות"
+              className="text-zinc-400 hover:bg-zinc-800/30 hover:text-zinc-200"
               onClick={onMeasurementClear}
             >
-              נקה
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-10 shrink-0 px-2 text-xs text-zinc-300"
+              <Trash2 aria-hidden />
+            </DockPillButton>
+            <DockPillButton
+              label="סיים"
+              title="סיים מדידה"
+              aria-label="סיים מדידה"
+              className="text-zinc-400 hover:bg-zinc-800/30 hover:text-zinc-200"
               onClick={onMeasurementFinish}
             >
-              סיים
-            </Button>
+              <Check aria-hidden />
+            </DockPillButton>
           </>
         )}
       </div>

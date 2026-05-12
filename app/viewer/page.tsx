@@ -7,8 +7,6 @@ import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { CompactModeNav } from "@/components/viewer/CompactModeNav";
 import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
-import { ClippingActiveBar } from "@/components/viewer/ClippingActiveBar";
-import { ViewModeActiveBar } from "@/components/viewer/ViewModeActiveBar";
 import { IsolationActionBar } from "@/components/viewer/IsolationActionBar";
 import { MultiSelectActionBar } from "@/components/viewer/MultiSelectActionBar";
 import { Button } from "@/components/ui/button";
@@ -1347,6 +1345,9 @@ export default function ViewerPage() {
         onMeasurementClear={() => engine?.clearMeasurements()}
         onMeasurementFinish={finishMeasurementTool}
         onApplyViewMode={handleApplyViewMode}
+        activeViewMode={viewMode === "none" ? undefined : viewMode}
+        appliedViewMode={viewMode === "none" ? undefined : viewMode}
+        onExitAppliedView={handleExitViewMode}
         viewModeDisabled={
           viewerTool === "measurement" || loadingState !== "ready"
         }
@@ -1355,6 +1356,24 @@ export default function ViewerPage() {
         sketchDisabled={loadingState !== "ready" || markupDrawingEnabled}
         clippingDisabled={loadingState !== "ready"}
         onPickClippingDirection={handlePickClippingDirection}
+        appliedClippingDirection={
+          loadingState === "ready" && clipSnap.active && clipSnap.direction
+            ? clipSnap.direction
+            : undefined
+        }
+        clippingHud={
+          loadingState === "ready" &&
+          clipSnap.active &&
+          !!clipSnap.labelHe
+            ? {
+                snapshot: clipSnap,
+                onDepthChange: handleClippingDepth,
+                onFlip: handleClippingFlip,
+                onSectionViewToggle: handleClippingSectionViewToggle,
+                onCancel: handleClippingCancel,
+              }
+            : undefined
+        }
         multiSelectActive={pickInteractionMode === "multi"}
         multiSelectEnterDisabled={
           loadingState !== "ready" ||
@@ -1375,24 +1394,6 @@ export default function ViewerPage() {
             : undefined
         }
       />
-      )}
-
-      {!inspectionActive && (
-        <ClippingActiveBar
-          snapshot={clipSnap}
-          onDepthChange={handleClippingDepth}
-          onFlip={handleClippingFlip}
-          onSectionViewToggle={handleClippingSectionViewToggle}
-          onCancel={handleClippingCancel}
-        />
-      )}
-
-      {!inspectionActive && viewMode !== "none" && (
-        <ViewModeActiveBar
-          viewMode={viewMode}
-          onExit={handleExitViewMode}
-          liftAboveClippingHud={clipSnap.active}
-        />
       )}
 
       {viewerTool === "measurement" && <SmartMeasurementCard />}

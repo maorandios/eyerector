@@ -1026,7 +1026,7 @@ export class ViewerEngine {
 
       const ctrl = this.world.camera.controls as CameraControls | undefined;
       const cam = this.world.camera.three;
-      if (!ctrl?.enabled || !cam?.isOrthographicCamera) return;
+      if (!ctrl?.enabled || cam.type !== "OrthographicCamera") return;
 
       const tn = e.target;
       if (!(tn instanceof Node) || (tn !== canvas && !canvas.contains(tn))) return;
