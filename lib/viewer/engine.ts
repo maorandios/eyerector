@@ -13,6 +13,7 @@ import {
   CONTEXT_GHOST_FACE_OPACITY,
   CONTEXT_GHOST_SNAPSHOT_NAME,
   EYE_STEEL_SCENE_BACKGROUND_HEX,
+  SELECTION_HIGHLIGHT_COLOR,
   applyEyeSteelRendererDefaults,
   applyEyeSteelSceneBackdrop,
   buildSelectionHighlightMaterial,
@@ -124,6 +125,7 @@ const INSPECTION_ORTHO_MARGIN = 1.12;
 /** Sketch + isolated would otherwise use lodOpacity 0 with edges-only — thin plates can vanish if edge geometry is empty. */
 const INSPECTION_SKETCH_LOD_FACE_OPACITY = 0.34;
 const ORTHO_DISTANCE_K = 1.75;
+const SELECTION_EDGE_FACE_COLOR = SELECTION_HIGHLIGHT_COLOR.clone().lerp(new THREE.Color(0xffffff), 0.1);
 /** Top toolbar / mode strip (px) — ortho מבט centers in the band below this and above the dock. */
 const VIEWER_TOP_CHROME_PX = 80;
 /** Bottom floating dock + gap (px). */
@@ -3282,6 +3284,30 @@ export class ViewerEngine {
 
   }
 
+  private clearPickedSelectionEdgeOverlay(): void {
+    disposePickedEdgeOverlay(this.pickedEdgeOverlay);
+    this.pickedEdgeOverlay = null;
+  }
+
+  private async rebuildPickedSelectionEdgeOverlay(
+    fragModel: FragmentsModel,
+    localIds: Iterable<number>,
+  ): Promise<void> {
+    this.clearPickedSelectionEdgeOverlay();
+    if (!this.modelObject) return;
+    const ids = [...new Set(localIds)].filter((n) => Number.isFinite(n));
+    if (ids.length === 0) return;
+
+    this.pickedEdgeOverlay = await buildPickedEdgeOverlay(
+      fragModel,
+      this.modelObject,
+      ids,
+      this.sketchEdgeMaterialPool,
+      { faceColorOverride: SELECTION_EDGE_FACE_COLOR },
+    );
+    this.modelObject.add(this.pickedEdgeOverlay);
+  }
+
   private extractFragmentDisplayColor(mesh: THREE.Mesh): THREE.Color {
     const mats = mesh.material;
     const m0 = Array.isArray(mats) ? mats[0] : mats;
@@ -3838,12 +3864,14 @@ export class ViewerEngine {
     if (!modelId) return;
     return this.enqueueIsolation(async () => {
       const fragments = this.components.get(OBC.FragmentsManager);
+      const fragModel = fragments.list.get(modelId);
 
       const map = await this.modelIdMapForAnalyzerEntities(entities);
       const ids = map[modelId];
       if (!ids || ids.size === 0) {
         await fragments.resetHighlight();
         await this.syncFragmentsViewForced(fragments);
+        this.clearPickedSelectionEdgeOverlay();
         this.clearSelectionOutlineTint();
         return;
       }
@@ -3856,6 +3884,9 @@ export class ViewerEngine {
       await fragments.resetHighlight();
       await fragments.highlight(this.highlightMaterialParams(), map);
       await this.syncFragmentsViewForced(fragments);
+      if (fragModel) {
+        await this.rebuildPickedSelectionEdgeOverlay(fragModel, ids);
+      }
     });
   }
 
@@ -3877,10 +3908,12 @@ export class ViewerEngine {
       const fragments = this.components.get(OBC.FragmentsManager);
       if (!fragments.initialized) return;
       if (this.isolationVisualMode !== "none") return;
+      const fragModel = this.modelId ? fragments.list.get(this.modelId) : null;
 
       if (ids.size === 0) {
         await fragments.resetHighlight();
         await this.syncFragmentsViewForced(fragments);
+        this.clearPickedSelectionEdgeOverlay();
         this.clearSelectionOutlineTint();
         return;
       }
@@ -3888,6 +3921,9 @@ export class ViewerEngine {
       await fragments.resetHighlight();
       await fragments.highlight(this.highlightMaterialParams(), this.bboxMapFromLocalSet(ids));
       await this.syncFragmentsViewForced(fragments);
+      if (fragModel) {
+        await this.rebuildPickedSelectionEdgeOverlay(fragModel, ids);
+      }
     });
   }
 
@@ -3895,6 +3931,7 @@ export class ViewerEngine {
     const fragments = this.components.get(OBC.FragmentsManager);
     await fragments.resetHighlight();
     await this.syncFragmentsViewForced(fragments);
+    this.clearPickedSelectionEdgeOverlay();
     this.clearSelectionOutlineTint();
   }
 

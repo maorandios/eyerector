@@ -24,6 +24,9 @@ import { cn } from "@/lib/utils";
 type FilterTab = ViewFilterGhostTab;
 const PANEL_SCROLL =
   "scrollbar-thin scrollbar-track-transparent scrollbar-thumb-zinc-400/70 hover:scrollbar-thumb-zinc-500/80 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-400/70 hover:[&::-webkit-scrollbar-thumb]:bg-zinc-500/80";
+const EYE_BUTTON_CLASS = "text-[#009DFF] hover:bg-[#009DFF]/10 hover:text-[#009DFF]";
+const EYE_BUTTON_DISABLED_CLASS = "cursor-not-allowed text-[#009DFF]/50";
+const EYE_ICON_CLASS = "!text-[#009DFF]";
 
 function aggregatePartsForAssemblyRow(row: AggregatedAssemblyRow): { part: AnalyzerPart; qty: number }[] {
   const m = new Map<string, { part: AnalyzerPart; qty: number }>();
@@ -73,8 +76,8 @@ function TabGhostEye({
       <button
         type="button"
         className={cn(
-          "grid size-7 shrink-0 place-items-center rounded-md transition-colors hover:bg-zinc-200",
-          ghostOnThisTab ? "bg-zinc-300 text-zinc-950" : "text-zinc-500 hover:text-zinc-800",
+          "grid size-7 shrink-0 place-items-center rounded-md transition-colors",
+          ghostOnThisTab ? "bg-[#009DFF]/10 text-[#009DFF]" : EYE_BUTTON_CLASS,
         )}
         title="מצב רוח (כמו הצג בהקשר): לחץ שורות בטבלה כדי להציג רגיל"
         aria-label={`מצב רוח בשונית ${label}`}
@@ -85,7 +88,7 @@ function TabGhostEye({
           onToggleGhost();
         }}
       >
-        <Eye className="size-4" />
+        <Eye className={`size-4 ${EYE_ICON_CLASS}`} />
       </button>
     </div>
   );
@@ -232,7 +235,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                           <td className="p-1 text-center align-middle">
                             <button
                               type="button"
-                              className="inline-flex rounded-md p-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950"
+                              className={`inline-flex rounded-md p-1.5 ${EYE_BUTTON_CLASS}`}
                               title={
                                 ghostRevealActive
                                   ? assemblyGhostAllRevealed
@@ -254,14 +257,14 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             >
                               {ghostRevealActive ? (
                                 assemblyGhostAllRevealed ? (
-                                  <Eye className="h-4 w-4" />
+                                  <Eye className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                                 ) : (
-                                  <EyeOff className="h-4 w-4" />
+                                  <EyeOff className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                                 )
                               ) : asmH ? (
-                                <EyeOff className="h-4 w-4" />
+                                <EyeOff className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                               ) : (
-                                <Eye className="h-4 w-4" />
+                                <Eye className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                               )}
                             </button>
                           </td>
@@ -306,8 +309,8 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                               className={cn(
                                                 "inline-flex rounded-md p-1.5",
                                                 parentHides && !ghostRevealActive
-                                                  ? "cursor-not-allowed text-zinc-600"
-                                                  : "text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950",
+                                                  ? EYE_BUTTON_DISABLED_CLASS
+                                                  : EYE_BUTTON_CLASS,
                                               )}
                                               disabled={parentHides && !ghostRevealActive}
                                               title={
@@ -333,14 +336,14 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                             >
                                               {ghostRevealActive ? (
                                                 ghostRev ? (
-                                                  <Eye className="h-3.5 w-3.5" />
+                                                  <Eye className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                                 ) : (
-                                                  <EyeOff className="h-3.5 w-3.5" />
+                                                  <EyeOff className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                                 )
                                               ) : showOff ? (
-                                                <EyeOff className="h-3.5 w-3.5" />
+                                                <EyeOff className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                               ) : (
-                                                <Eye className="h-3.5 w-3.5" />
+                                                <Eye className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                               )}
                                             </button>
                                           </td>
@@ -405,7 +408,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                           <td className="p-1 text-center align-middle">
                             <button
                               type="button"
-                              className="inline-flex rounded-md p-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950"
+                              className={`inline-flex rounded-md p-1.5 ${EYE_BUTTON_CLASS}`}
                               title={
                                 ghostRevealActive
                                   ? partGroupGhostAllRevealed
@@ -424,14 +427,14 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             >
                               {ghostRevealActive ? (
                                 partGroupGhostAllRevealed ? (
-                                  <Eye className="h-4 w-4" />
+                                  <Eye className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                                 ) : (
-                                  <EyeOff className="h-4 w-4" />
+                                  <EyeOff className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                                 )
                               ) : groupH ? (
-                                <EyeOff className="h-4 w-4" />
+                                <EyeOff className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                               ) : (
-                                <Eye className="h-4 w-4" />
+                                <Eye className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                               )}
                             </button>
                           </td>
@@ -480,8 +483,8 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                             className={cn(
                                               "inline-flex rounded-md p-1.5",
                                               parentHides && !ghostRevealActive
-                                                ? "cursor-not-allowed text-zinc-600"
-                                                : "text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950",
+                                                ? EYE_BUTTON_DISABLED_CLASS
+                                                : EYE_BUTTON_CLASS,
                                             )}
                                             disabled={parentHides && !ghostRevealActive}
                                             title={
@@ -507,14 +510,14 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                           >
                                             {ghostRevealActive ? (
                                               ghostRev ? (
-                                                <Eye className="h-3.5 w-3.5" />
+                                                <Eye className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                               ) : (
-                                                <EyeOff className="h-3.5 w-3.5" />
+                                                <EyeOff className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                               )
                                             ) : showOff ? (
-                                              <EyeOff className="h-3.5 w-3.5" />
+                                              <EyeOff className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                             ) : (
-                                              <Eye className="h-3.5 w-3.5" />
+                                              <Eye className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                             )}
                                           </button>
                                         </td>
@@ -585,7 +588,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                           <td className="p-1 text-center align-middle">
                             <button
                               type="button"
-                              className="inline-flex rounded-md p-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950"
+                              className={`inline-flex rounded-md p-1.5 ${EYE_BUTTON_CLASS}`}
                               title={
                                 ghostRevealActive
                                   ? profGroupGhostAllRevealed
@@ -604,14 +607,14 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             >
                               {ghostRevealActive ? (
                                 profGroupGhostAllRevealed ? (
-                                  <Eye className="h-4 w-4" />
+                                  <Eye className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                                 ) : (
-                                  <EyeOff className="h-4 w-4" />
+                                  <EyeOff className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                                 )
                               ) : groupH ? (
-                                <EyeOff className="h-4 w-4" />
+                                <EyeOff className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                               ) : (
-                                <Eye className="h-4 w-4" />
+                                <Eye className={`h-4 w-4 ${EYE_ICON_CLASS}`} />
                               )}
                             </button>
                           </td>
@@ -658,8 +661,8 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                             className={cn(
                                               "inline-flex rounded-md p-1.5",
                                               parentHides && !ghostRevealActive
-                                                ? "cursor-not-allowed text-zinc-600"
-                                                : "text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950",
+                                                ? EYE_BUTTON_DISABLED_CLASS
+                                                : EYE_BUTTON_CLASS,
                                             )}
                                             disabled={parentHides && !ghostRevealActive}
                                             title={
@@ -685,14 +688,14 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                           >
                                             {ghostRevealActive ? (
                                               ghostRev ? (
-                                                <Eye className="h-3.5 w-3.5" />
+                                                <Eye className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                               ) : (
-                                                <EyeOff className="h-3.5 w-3.5" />
+                                                <EyeOff className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                               )
                                             ) : showOff ? (
-                                              <EyeOff className="h-3.5 w-3.5" />
+                                              <EyeOff className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                             ) : (
-                                              <Eye className="h-3.5 w-3.5" />
+                                              <Eye className={`h-3.5 w-3.5 ${EYE_ICON_CLASS}`} />
                                             )}
                                           </button>
                                         </td>

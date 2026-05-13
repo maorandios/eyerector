@@ -426,7 +426,7 @@ export function AssemblyPickDetailPanel({
         </h3>
         {aggregatedBolts.length === 0 ? (
           <p className="rounded-xl bg-zinc-200/60 px-3 py-4 text-center text-[11px] text-zinc-500">
-            לא זוהו ברגים תחת הרכבה זו (כולל קבוצות מקוננות)
+            אין ברגים המשוייכים לאסמבלי זה
           </p>
         ) : (
           <div className={`${PANEL_SCROLL} overflow-x-auto`}>

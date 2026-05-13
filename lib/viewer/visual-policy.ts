@@ -65,7 +65,7 @@ export function buildSelectionHighlightMaterial(): MaterialDefinition {
   const color = SELECTION_HIGHLIGHT_COLOR.clone().lerp(new THREE.Color(0xffffff), 0.1);
   return {
     color,
-    opacity: 0.91,
+    opacity: 0.85,
     transparent: true,
     depthWrite: true,
     renderedFaces: 0,

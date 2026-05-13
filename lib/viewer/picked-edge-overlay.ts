@@ -25,7 +25,7 @@ const GEOM_BATCH = 48;
  * Worker uses LOD `CurrentLod.GEOMETRY = 0` to return real per-item index/position buffers
  * (instead of LOD billboards). We pin `0` here to avoid pulling the enum at runtime.
  */
-const FRAGMENTS_LOD_GEOMETRY: 0 = 0;
+const FRAGMENTS_LOD_GEOMETRY = 0 as const;
 
 type LodLikeMaterial = THREE.ShaderMaterial & { lodColor: THREE.Color };
 
@@ -222,6 +222,8 @@ export type BuildPickedEdgeOverlayOptions = {
   yieldBetweenBatches?: boolean;
   /** Root group name (default {@link PICKED_EDGE_OVERLAY_NAME}). */
   groupName?: string;
+  /** Optional face color to darken for all overlay edges, used for active selection outlines. */
+  faceColorOverride?: THREE.Color;
 };
 
 export async function buildPickedEdgeOverlay(
@@ -237,7 +239,9 @@ export async function buildPickedEdgeOverlay(
   const ids = [...new Set(pickedLocalIds)].filter((n) => Number.isFinite(n));
   if (ids.length === 0) return group;
 
-  const colorByLocal = await resolvePickedFaceColors(fragModel, modelRoot, ids);
+  const colorByLocal = options?.faceColorOverride
+    ? new Map<number, THREE.Color>()
+    : await resolvePickedFaceColors(fragModel, modelRoot, ids);
   const threshold = THREE.MathUtils.degToRad(SKETCH_EDGE_THRESHOLD_DEG);
   const yieldBetween = options?.yieldBetweenBatches === true;
 
@@ -255,7 +259,7 @@ export async function buildPickedEdgeOverlay(
       const chunks = itemGeoms[j];
       if (!chunks?.length) continue;
 
-      const face = colorByLocal.get(localId) ?? FALLBACK_EDGE_COLOR;
+      const face = options?.faceColorOverride ?? colorByLocal.get(localId) ?? FALLBACK_EDGE_COLOR;
       const lineMat = getOrCreateSketchEdgeLineMaterial(lineMaterialPool, face);
 
       for (const md of chunks) {
