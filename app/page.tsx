@@ -7,6 +7,8 @@ import { Card } from "@/components/ui/card";
 import { he } from "@/lib/i18n/he";
 import { useAppStore } from "@/lib/state/app-store";
 
+const ANALYZER_API_URL = process.env.NEXT_PUBLIC_ANALYZER_API_URL?.replace(/\/$/, "");
+
 export default function HomePage() {
   const router = useRouter();
   const [error, setError] = useState("");
@@ -35,13 +37,16 @@ export default function HomePage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await fetch("/api/analyze-ifc", {
+      const analyzerEndpoint = ANALYZER_API_URL
+        ? `${ANALYZER_API_URL}/analyze-ifc`
+        : "/api/analyze-ifc";
+      const response = await fetch(analyzerEndpoint, {
         method: "POST",
         body: formData,
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.error || "Analyzer request failed");
+        throw new Error(payload.detail || payload.error || "Analyzer request failed");
       }
       const analyzerData = await response.json();
       setAnalyzerData(analyzerData);
