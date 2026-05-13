@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
-import { CompactModeNav } from "@/components/viewer/CompactModeNav";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
 import { MultiSelectWeightPill } from "@/components/viewer/MultiSelectWeightPill";
 import { Button } from "@/components/ui/button";
@@ -99,7 +98,7 @@ export default function ViewerPage() {
     profileLabel: string;
     instances: AnalyzerPart[];
   } | null>(null);
-  const [selectionStatus, setSelectionStatus] = useState("בחר אלמנט במודל או מהטבלה");
+  const [, setSelectionStatus] = useState("בחר אלמנט במודל או מהטבלה");
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [markupDrawingEnabled, setMarkupDrawingEnabled] = useState(false);
   const [drawingClearSignal, setDrawingClearSignal] = useState(0);
@@ -116,7 +115,6 @@ export default function ViewerPage() {
     file,
     analyzerData,
     mode,
-    setMode,
     search,
     activeSheet,
     setActiveSheet,
@@ -425,11 +423,6 @@ export default function ViewerPage() {
   const hideAllFastenersKeepHoles = useViewFilterStore((s) => s.hideAllFastenersKeepHoles);
   const toggleHideAllFastenersKeepHoles = useViewFilterStore(
     (s) => s.toggleHideAllFastenersKeepHoles,
-  );
-
-  const assemblyRollupAll = useMemo(
-    () => aggregateAssembliesByMark(analyzerData?.assemblies ?? []),
-    [analyzerData?.assemblies],
   );
 
   const filteredAssemblies = useMemo(() => {
@@ -1473,25 +1466,9 @@ export default function ViewerPage() {
         {loadingState === "error" ? "שגיאה בטעינת IFC" : ""}
       </div>
 
-      {!inspectionActive && <CompactModeNav mode={mode} onModeChange={setMode} />}
-
       {!inspectionActive && pickInteractionMode === "multi" && multiSelectedCount > 0 ? (
         <MultiSelectWeightPill totalWeightKg={multiSelectTotalWeightKg} />
       ) : null}
-
-      <div className="pointer-events-auto absolute right-3 top-[4.75rem] z-20 flex max-w-[min(19rem,88vw)] flex-col items-end gap-1 safe-top">
-        {analyzerData && (
-          <div className="rounded-lg border border-zinc-700 bg-zinc-900/88 px-2 py-1 text-[10px] leading-tight text-zinc-300">
-            {formatCount(assemblyRollupAll.length)} הרכבות · {formatCount(analyzerData.parts.length)} חלקים
-          </div>
-        )}
-        <div className="w-full truncate rounded-lg border border-zinc-700 bg-zinc-900/88 px-2 py-1 text-[10px] text-zinc-300">
-          בחירה: {selectionStatus}
-        </div>
-        <Button variant="ghost" className="h-8 px-2 text-[11px] text-zinc-400 hover:text-zinc-100" onClick={() => void clearViewerSelection()}>
-          נקה בחירה
-        </Button>
-      </div>
 
       {!inspectionActive &&
         elementContextPanel &&
