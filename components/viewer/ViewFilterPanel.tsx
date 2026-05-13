@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useState } from "react";
-import { ChevronDown, Eye, EyeOff } from "lucide-react";
+import { ChevronDown, Eye, EyeOff, Funnel, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AnalyzerAssembly, AnalyzerPart } from "@/types/domain";
 import {
@@ -22,6 +22,8 @@ import {
 import { cn } from "@/lib/utils";
 
 type FilterTab = ViewFilterGhostTab;
+const PANEL_SCROLL =
+  "scrollbar-thin scrollbar-track-transparent scrollbar-thumb-zinc-400/70 hover:scrollbar-thumb-zinc-500/80 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-400/70 hover:[&::-webkit-scrollbar-thumb]:bg-zinc-500/80";
 
 function aggregatePartsForAssemblyRow(row: AggregatedAssemblyRow): { part: AnalyzerPart; qty: number }[] {
   const m = new Map<string, { part: AnalyzerPart; qty: number }>();
@@ -54,15 +56,15 @@ function TabGhostEye({
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-1 items-stretch rounded-md border border-transparent",
-        active ? "border-zinc-600 bg-zinc-700 text-zinc-100" : "text-zinc-400",
+        "flex min-w-0 flex-1 items-center gap-1 rounded-md px-1 py-1 transition-colors",
+        active ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:bg-white/70",
       )}
     >
       <button
         type="button"
         className={cn(
-          "min-w-0 flex-1 truncate rounded-l-md px-1 py-2 text-xs font-medium transition-colors",
-          !active && "hover:bg-zinc-800/80",
+          "min-w-0 flex-1 truncate rounded-md px-1 py-1 text-xs font-medium transition-colors",
+          !active && "hover:bg-white/40",
         )}
         onClick={onSelectTab}
       >
@@ -71,8 +73,8 @@ function TabGhostEye({
       <button
         type="button"
         className={cn(
-          "shrink-0 rounded-r-md border-r border-zinc-600 px-1 transition-colors hover:bg-zinc-600/50",
-          ghostOnThisTab ? "bg-emerald-900/70 text-emerald-200" : "text-zinc-500 hover:text-zinc-200",
+          "grid size-7 shrink-0 place-items-center rounded-md transition-colors hover:bg-zinc-200",
+          ghostOnThisTab ? "bg-zinc-300 text-zinc-950" : "text-zinc-500 hover:text-zinc-800",
         )}
         title="מצב רוח (כמו הצג בהקשר): לחץ שורות בטבלה כדי להציג רגיל"
         aria-label={`מצב רוח בשונית ${label}`}
@@ -83,7 +85,7 @@ function TabGhostEye({
           onToggleGhost();
         }}
       >
-        <Eye className="mx-auto h-4 w-4" />
+        <Eye className="size-4" />
       </button>
     </div>
   );
@@ -128,19 +130,34 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
 
   return (
     <>
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-semibold text-zinc-100">סינון תצוגה</p>
-        <div className="flex items-center gap-2">
-          <Button type="button" variant="secondary" className="h-8 px-3 text-xs font-semibold" onClick={handleReset}>
+      <div className="relative mb-4 flex min-h-8 items-center justify-between gap-3 pb-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <Funnel className="size-5 shrink-0 text-zinc-600" aria-hidden />
+          <p className="text-sm font-semibold text-zinc-950">סינון תצוגה</p>
+        </div>
+        <div className="ml-9 flex items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-8 rounded-full bg-white px-3 text-xs font-semibold text-zinc-700 shadow-sm hover:bg-zinc-100"
+            onClick={handleReset}
+          >
             איפוס
           </Button>
-          <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={onClose}>
-            סגור
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="absolute left-0 top-1/2 size-8 -translate-y-1/2 rounded-full text-zinc-500 hover:bg-zinc-200 hover:text-zinc-950"
+            onClick={onClose}
+            aria-label="סגור סינון תצוגה"
+          >
+            <X className="size-4" aria-hidden />
           </Button>
         </div>
       </div>
 
-      <div className="mb-2 flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
+      <div className="mb-3 flex gap-1 rounded-xl border border-zinc-300 bg-zinc-200/70 p-1">
         <TabGhostEye
           label="הרכבות"
           active={tab === "assemblies"}
@@ -173,19 +190,24 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
         />
       </div>
 
-      <div className="max-h-[calc(100vh-12rem)] overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/30 p-2">
+      <div
+        className={cn(
+          PANEL_SCROLL,
+          "max-h-[calc(100vh-9.5rem)] overflow-auto p-1.5",
+        )}
+      >
         {tab === "assemblies" && (
           <>
             {rows.length === 0 ? (
               <p className="px-1 py-4 text-center text-sm text-zinc-500">אין הרכבות במודל</p>
             ) : (
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
+                <thead className="sticky -top-1.5 z-10 bg-[#eef1f3] text-[10px] text-zinc-500">
                   <tr>
-                    <th className="w-8 p-1" aria-hidden />
+                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                     <th className="p-2 text-right font-medium">מספר הרכבה</th>
                     <th className="p-2 text-right font-medium">כמות</th>
-                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
+                    <th className="w-8 p-1" aria-hidden />
                   </tr>
                 </thead>
                 <tbody>
@@ -202,26 +224,15 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                     return (
                       <Fragment key={row.key}>
                         <tr
-                          className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-800/90"
+                          className="cursor-pointer border-t border-zinc-200 hover:bg-zinc-200/70"
                           onClick={() =>
                             setExpandedAssemblyKey((k) => (k === row.key ? null : row.key))
                           }
                         >
-                          <td className="p-1 align-middle">
-                            <ChevronDown
-                              className={cn(
-                                "mx-auto h-4 w-4 text-zinc-500 transition-transform",
-                                expanded ? "rotate-180" : "rotate-0",
-                              )}
-                              aria-hidden
-                            />
-                          </td>
-                          <td className="p-2 font-medium text-zinc-100">{row.displayMark}</td>
-                          <td className="p-2 text-zinc-300">{formatCount(row.qty)}</td>
                           <td className="p-1 text-center align-middle">
                             <button
                               type="button"
-                              className="inline-flex rounded-md p-1.5 text-zinc-200 hover:bg-zinc-700"
+                              className="inline-flex rounded-md p-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950"
                               title={
                                 ghostRevealActive
                                   ? assemblyGhostAllRevealed
@@ -254,19 +265,30 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                               )}
                             </button>
                           </td>
+                          <td className="p-2 font-medium text-zinc-900">{row.displayMark}</td>
+                          <td className="p-2 text-zinc-700">{formatCount(row.qty)}</td>
+                          <td className="p-1 align-middle">
+                            <ChevronDown
+                              className={cn(
+                                "mx-auto h-4 w-4 text-zinc-500 transition-transform",
+                                expanded ? "rotate-180" : "rotate-0",
+                              )}
+                              aria-hidden
+                            />
+                          </td>
                         </tr>
                         {expanded && (
-                          <tr className="border-t border-zinc-800 bg-zinc-900/50">
+                          <tr className="border-t border-zinc-200 bg-zinc-50/80">
                             <td colSpan={4} className="p-0">
                               {partRows.length === 0 ? (
                                 <p className="px-4 py-3 text-[11px] text-zinc-500">אין חלקים במסכת הרכבה זו</p>
                               ) : (
                                 <table className="w-full text-[11px]">
-                                  <thead className="text-zinc-500">
+                                  <thead className="text-[10px] text-zinc-500">
                                     <tr>
+                                      <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                                       <th className="p-2 pr-6 text-right font-medium">שם חלק</th>
                                       <th className="p-2 text-right font-medium">כמות</th>
-                                      <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -277,9 +299,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                       const ghostRev = ghostRevealedPartIds[part.id];
 
                                       return (
-                                        <tr key={part.id} className="border-t border-zinc-800/80">
-                                          <td className="p-2 pr-6 font-medium text-zinc-200">{displayPartMark(part)}</td>
-                                          <td className="p-2 text-zinc-400">{formatQuantityInt(qty)}</td>
+                                        <tr key={part.id} className="border-t border-zinc-200">
                                           <td className="p-1 text-center">
                                             <button
                                               type="button"
@@ -287,7 +307,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                                 "inline-flex rounded-md p-1.5",
                                                 parentHides && !ghostRevealActive
                                                   ? "cursor-not-allowed text-zinc-600"
-                                                  : "text-zinc-200 hover:bg-zinc-700",
+                                                  : "text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950",
                                               )}
                                               disabled={parentHides && !ghostRevealActive}
                                               title={
@@ -324,6 +344,8 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                               )}
                                             </button>
                                           </td>
+                                          <td className="p-2 pr-6 font-medium text-zinc-800">{displayPartMark(part)}</td>
+                                          <td className="p-2 text-zinc-600">{formatQuantityInt(qty)}</td>
                                         </tr>
                                       );
                                     })}
@@ -348,13 +370,13 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
               <p className="px-1 py-4 text-center text-sm text-zinc-500">אין חלקים במודל</p>
             ) : (
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
+                <thead className="sticky -top-1.5 z-10 bg-[#eef1f3] text-[10px] text-zinc-500">
                   <tr>
-                    <th className="w-8 p-1" aria-hidden />
+                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                     <th className="p-2 text-right font-medium">מספר חלק</th>
                     <th className="p-2 text-right font-medium">פרופיל</th>
                     <th className="p-2 text-right font-medium">כמות</th>
-                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
+                    <th className="w-8 p-1" aria-hidden />
                   </tr>
                 </thead>
                 <tbody>
@@ -372,7 +394,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                       <Fragment key={row.key}>
                         <tr
                           className={cn(
-                            "border-t border-zinc-800 hover:bg-zinc-800/90",
+                            "border-t border-zinc-200 hover:bg-zinc-200/70",
                             canExpand ? "cursor-pointer" : "",
                           )}
                           onClick={() => {
@@ -380,26 +402,10 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             setExpandedPartRowKey((k) => (k === row.key ? null : row.key));
                           }}
                         >
-                          <td className="p-1 align-middle">
-                            {canExpand ? (
-                              <ChevronDown
-                                className={cn(
-                                  "mx-auto h-4 w-4 text-zinc-500 transition-transform",
-                                  expanded ? "rotate-180" : "rotate-0",
-                                )}
-                                aria-hidden
-                              />
-                            ) : (
-                              <span className="block h-4 w-4" aria-hidden />
-                            )}
-                          </td>
-                          <td className="p-2 font-medium text-zinc-100">{row.displayMark}</td>
-                          <td className="p-2 text-zinc-300">{row.displayProfile}</td>
-                          <td className="p-2 text-zinc-300">{formatQuantityInt(row.effectiveQty)}</td>
                           <td className="p-1 text-center align-middle">
                             <button
                               type="button"
-                              className="inline-flex rounded-md p-1.5 text-zinc-200 hover:bg-zinc-700"
+                              className="inline-flex rounded-md p-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950"
                               title={
                                 ghostRevealActive
                                   ? partGroupGhostAllRevealed
@@ -429,17 +435,33 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                               )}
                             </button>
                           </td>
+                          <td className="p-2 font-medium text-zinc-900">{row.displayMark}</td>
+                          <td className="p-2 text-zinc-700">{row.displayProfile}</td>
+                          <td className="p-2 text-zinc-700">{formatQuantityInt(row.effectiveQty)}</td>
+                          <td className="p-1 align-middle">
+                            {canExpand ? (
+                              <ChevronDown
+                                className={cn(
+                                  "mx-auto h-4 w-4 text-zinc-500 transition-transform",
+                                  expanded ? "rotate-180" : "rotate-0",
+                                )}
+                                aria-hidden
+                              />
+                            ) : (
+                              <span className="block h-4 w-4" aria-hidden />
+                            )}
+                          </td>
                         </tr>
                         {expanded && canExpand && (
-                          <tr className="border-t border-zinc-800 bg-zinc-900/50">
+                          <tr className="border-t border-zinc-200 bg-zinc-50/80">
                             <td colSpan={5} className="p-0">
                               <table className="w-full text-[11px]">
-                                <thead className="text-zinc-500">
+                                <thead className="text-[10px] text-zinc-500">
                                   <tr>
+                                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                                     <th className="p-2 pr-6 text-right font-medium">מספר חלק</th>
                                     <th className="p-2 text-right font-medium">פרופיל</th>
                                     <th className="p-2 text-right font-medium">כמות</th>
-                                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -448,22 +470,10 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                     const partOnly = !parentHides && isPartHidden(part.id);
                                     const showOff = parentHides || partOnly;
                                     const ghostRev = ghostRevealedPartIds[part.id];
-                                    const subLabel =
-                                      displayPartMark(part) +
-                                      (part.expressId != null ? ` #${part.expressId}` : "");
+                                    const subLabel = displayPartMark(part);
 
                                     return (
-                                      <tr key={part.id} className="border-t border-zinc-800/80">
-                                        <td
-                                          className="p-2 pr-6 font-medium text-zinc-200"
-                                          title={part.id}
-                                        >
-                                          {subLabel}
-                                        </td>
-                                        <td className="p-2 text-zinc-400">{row.displayProfile}</td>
-                                        <td className="p-2 text-zinc-400">
-                                          {formatQuantityInt(steelPartEntityQtyContribution(part))}
-                                        </td>
+                                      <tr key={part.id} className="border-t border-zinc-200">
                                         <td className="p-1 text-center">
                                           <button
                                             type="button"
@@ -471,7 +481,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                               "inline-flex rounded-md p-1.5",
                                               parentHides && !ghostRevealActive
                                                 ? "cursor-not-allowed text-zinc-600"
-                                                : "text-zinc-200 hover:bg-zinc-700",
+                                                : "text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950",
                                             )}
                                             disabled={parentHides && !ghostRevealActive}
                                             title={
@@ -508,6 +518,16 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                             )}
                                           </button>
                                         </td>
+                                        <td
+                                          className="p-2 pr-6 font-medium text-zinc-800"
+                                          title={part.id}
+                                        >
+                                          {subLabel}
+                                        </td>
+                                        <td className="p-2 text-zinc-600">{row.displayProfile}</td>
+                                        <td className="p-2 text-zinc-600">
+                                          {formatQuantityInt(steelPartEntityQtyContribution(part))}
+                                        </td>
                                       </tr>
                                     );
                                   })}
@@ -531,12 +551,12 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
               <p className="px-1 py-4 text-center text-sm text-zinc-500">אין פרופילים במודל</p>
             ) : (
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
+                <thead className="sticky -top-1.5 z-10 bg-[#eef1f3] text-[10px] text-zinc-500">
                   <tr>
-                    <th className="w-8 p-1" aria-hidden />
+                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                     <th className="p-2 text-right font-medium">שם הפרופיל</th>
                     <th className="p-2 text-right font-medium">כמות</th>
-                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
+                    <th className="w-8 p-1" aria-hidden />
                   </tr>
                 </thead>
                 <tbody>
@@ -554,7 +574,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                       <Fragment key={row.key}>
                         <tr
                           className={cn(
-                            "border-t border-zinc-800 hover:bg-zinc-800/90",
+                            "border-t border-zinc-200 hover:bg-zinc-200/70",
                             canExpand ? "cursor-pointer" : "",
                           )}
                           onClick={() => {
@@ -562,25 +582,10 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                             setExpandedProfileRowKey((k) => (k === row.key ? null : row.key));
                           }}
                         >
-                          <td className="p-1 align-middle">
-                            {canExpand ? (
-                              <ChevronDown
-                                className={cn(
-                                  "mx-auto h-4 w-4 text-zinc-500 transition-transform",
-                                  expanded ? "rotate-180" : "rotate-0",
-                                )}
-                                aria-hidden
-                              />
-                            ) : (
-                              <span className="block h-4 w-4" aria-hidden />
-                            )}
-                          </td>
-                          <td className="p-2 font-medium text-zinc-100">{row.profileLabel}</td>
-                          <td className="p-2 text-zinc-300">{formatQuantityInt(row.totalQty)}</td>
                           <td className="p-1 text-center align-middle">
                             <button
                               type="button"
-                              className="inline-flex rounded-md p-1.5 text-zinc-200 hover:bg-zinc-700"
+                              className="inline-flex rounded-md p-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950"
                               title={
                                 ghostRevealActive
                                   ? profGroupGhostAllRevealed
@@ -610,16 +615,31 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                               )}
                             </button>
                           </td>
+                          <td className="p-2 font-medium text-zinc-900">{row.profileLabel}</td>
+                          <td className="p-2 text-zinc-700">{formatQuantityInt(row.totalQty)}</td>
+                          <td className="p-1 align-middle">
+                            {canExpand ? (
+                              <ChevronDown
+                                className={cn(
+                                  "mx-auto h-4 w-4 text-zinc-500 transition-transform",
+                                  expanded ? "rotate-180" : "rotate-0",
+                                )}
+                                aria-hidden
+                              />
+                            ) : (
+                              <span className="block h-4 w-4" aria-hidden />
+                            )}
+                          </td>
                         </tr>
                         {expanded && canExpand && (
-                          <tr className="border-t border-zinc-800 bg-zinc-900/50">
+                          <tr className="border-t border-zinc-200 bg-zinc-50/80">
                             <td colSpan={4} className="p-0">
                               <table className="w-full text-[11px]">
-                                <thead className="text-zinc-500">
+                                <thead className="text-[10px] text-zinc-500">
                                   <tr>
+                                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                                     <th className="p-2 pr-6 text-right font-medium">מספר חלק</th>
                                     <th className="p-2 text-right font-medium">כמות</th>
-                                    <th className="w-11 p-1 text-center font-medium">תצוגה</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -628,21 +648,10 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                     const partOnly = !parentHides && isPartHidden(part.id);
                                     const showOff = parentHides || partOnly;
                                     const ghostRev = ghostRevealedPartIds[part.id];
-                                    const subLabel =
-                                      displayPartMark(part) +
-                                      (part.expressId != null ? ` #${part.expressId}` : "");
+                                    const subLabel = displayPartMark(part);
 
                                     return (
-                                      <tr key={part.id} className="border-t border-zinc-800/80">
-                                        <td
-                                          className="p-2 pr-6 font-medium text-zinc-200"
-                                          title={part.id}
-                                        >
-                                          {subLabel}
-                                        </td>
-                                        <td className="p-2 text-zinc-400">
-                                          {formatQuantityInt(steelPartEntityQtyContribution(part))}
-                                        </td>
+                                      <tr key={part.id} className="border-t border-zinc-200">
                                         <td className="p-1 text-center">
                                           <button
                                             type="button"
@@ -650,7 +659,7 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                               "inline-flex rounded-md p-1.5",
                                               parentHides && !ghostRevealActive
                                                 ? "cursor-not-allowed text-zinc-600"
-                                                : "text-zinc-200 hover:bg-zinc-700",
+                                                : "text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950",
                                             )}
                                             disabled={parentHides && !ghostRevealActive}
                                             title={
@@ -686,6 +695,15 @@ export function ViewFilterPanel({ assemblies, steelParts, onClose }: Props) {
                                               <Eye className="h-3.5 w-3.5" />
                                             )}
                                           </button>
+                                        </td>
+                                        <td
+                                          className="p-2 pr-6 font-medium text-zinc-800"
+                                          title={part.id}
+                                        >
+                                          {subLabel}
+                                        </td>
+                                        <td className="p-2 text-zinc-600">
+                                          {formatQuantityInt(steelPartEntityQtyContribution(part))}
                                         </td>
                                       </tr>
                                     );

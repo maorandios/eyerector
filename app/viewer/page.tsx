@@ -7,7 +7,6 @@ import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
 import { MultiSelectWeightPill } from "@/components/viewer/MultiSelectWeightPill";
 import { Button } from "@/components/ui/button";
-import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
 import { useClippingStore } from "@/lib/state/clipping-store";
 import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
@@ -28,7 +27,7 @@ import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
 import { isAnalyzerBoltRow } from "@/types/domain";
-import { MoveLeft } from "lucide-react";
+import { LayoutList, MoveLeft, SquaresIntersect, SquaresUnite, X } from "lucide-react";
 import {
   AssemblyPickDetailPanel,
   PartPickDetailPanel,
@@ -77,6 +76,12 @@ const ASSEMBLY_STRUCTURE_NOTICE_HE =
   "המודל אינו מכיל חלוקה לאסמבליז, נדרש לייצא את המודל שוב עם חלוקה לאמסבליז במצב פעיל";
 
 const ELEMENT_PICK_CONTEXT_PANEL_SELECTOR = `[${ELEMENT_PICK_PANEL_ATTR}]`;
+const VIEWER_SIDE_PANEL_CHROME =
+  "pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-300/80 bg-[#eef1f3]/95 p-3 pt-8 text-zinc-800 shadow-[-18px_0_45px_rgba(39,39,42,0.18)] backdrop-blur-xl " +
+  "[&_button]:text-zinc-700 [&_button:hover]:bg-zinc-200/80 [&_button:hover]:text-zinc-950 [&_svg]:text-zinc-500 " +
+  "[&_thead]:text-zinc-500 [&_tbody_tr]:border-zinc-200 [&_th]:text-zinc-500 [&_td]:text-zinc-700 [&_td.font-medium]:text-zinc-900 [&_p]:text-zinc-600";
+const VIEWER_SIDE_PANEL_SCROLL =
+  "scrollbar-thin scrollbar-track-transparent scrollbar-thumb-zinc-400/70 hover:scrollbar-thumb-zinc-500/80 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-400/70 hover:[&::-webkit-scrollbar-thumb]:bg-zinc-500/80";
 
 type SelectionMode = "part" | "assembly";
 type ModelDataTab = "assemblies" | "parts" | "profiles";
@@ -289,7 +294,6 @@ export default function ViewerPage() {
   }, [engine, toggleSketchMode]);
 
   const onReady = useCallback((instance: ViewerEngine | null) => setEngine(instance), []);
-  const modeLabel = modeConfig[mode].label;
 
   useEffect(() => {
     if (viewerTool !== "measurement") {
@@ -1644,9 +1648,9 @@ export default function ViewerPage() {
       )}
 
       {showFilterPanel && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex justify-end">
+        <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex">
           <aside
-            className="pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-700 bg-zinc-950/95 p-4 pt-16 shadow-2xl"
+            className={VIEWER_SIDE_PANEL_CHROME}
             dir="rtl"
           >
             <ViewFilterPanel
@@ -1659,66 +1663,77 @@ export default function ViewerPage() {
       )}
 
       {showDataPanel && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex justify-end">
+        <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex">
           <aside
-            className="pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-700 bg-zinc-950/95 p-4 pt-16 shadow-2xl"
+            className={VIEWER_SIDE_PANEL_CHROME}
             dir="rtl"
           >
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-zinc-100">
-              {assemblyStructureNotice
-                ? "מצב הרכבה"
-                : selectedAssembly
-                  ? "פרטי הרכבה"
-                  : selectedPart
-                    ? "פרטי חלק"
-                    : profileGroupDetail
-                      ? "פרטי פרופיל"
-                      : `נתוני מודל (${modeLabel})`}
-            </p>
+          <div className="relative mb-4 flex min-h-8 items-center justify-between gap-3 pb-1">
+            <div className="flex min-w-0 items-center gap-2">
+              {selectedAssembly ? (
+                <SquaresUnite className="size-5 shrink-0 text-zinc-600" aria-hidden />
+              ) : selectedPart ? (
+                <SquaresIntersect className="size-5 shrink-0 text-zinc-600" aria-hidden />
+              ) : (
+                <LayoutList className="size-5 shrink-0 text-zinc-600" aria-hidden />
+              )}
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-zinc-950">
+                  {selectedAssembly
+                    ? selectedAssembly.assemblyMark ||
+                      selectedAssembly.name ||
+                      selectedAssembly.tag ||
+                      "הרכבה"
+                    : selectedPart
+                      ? isAnalyzerBoltRow(selectedPart)
+                        ? selectedPart.boltName || selectedPart.name || "בורג"
+                        : displayPartMark(selectedPart as AnalyzerPart)
+                    : "דאשבורד"}
+                </p>
+              </div>
+            </div>
             <Button
               variant="ghost"
+              size="icon"
+              className="absolute left-0 top-1/2 size-8 -translate-y-1/2 rounded-full text-zinc-500 hover:bg-zinc-200 hover:text-zinc-950"
               onClick={() => {
+                if (selectedAssembly) {
+                  void selectAssembly(null);
+                  return;
+                }
+                if (selectedPart) {
+                  void selectPart(null);
+                  return;
+                }
                 setAssemblyStructureNotice(false);
                 setActiveSheet("none");
               }}
+              aria-label={
+                selectedAssembly
+                  ? "חזרה לרשימת אמסבלי"
+                  : selectedPart
+                    ? "חזרה לרשימה"
+                    : "סגור דאשבורד"
+              }
             >
-              סגור
+              {selectedAssembly || selectedPart ? (
+                <MoveLeft className="size-4" aria-hidden />
+              ) : (
+                <X className="size-4" aria-hidden />
+              )}
             </Button>
           </div>
 
-          {!selectedAssembly && !selectedPart && !profileGroupDetail && !assemblyStructureNotice && (
-            <div className="mb-3 text-xs text-zinc-400">
-              {modelDataTab === "assemblies" && (
-                <>
-                  קבוצות: {formatCount(aggregatedAssemblies.length)} · מופעי IFC:{" "}
-                  {formatCount(filteredAssemblies.length)}
-                </>
-              )}
-              {modelDataTab === "parts" && (
-                <>
-                  קבוצות: {formatCount(aggregatedPartsTabRows.length)} · פריטי IFC:{" "}
-                  {formatCount(filteredParts.length)}
-                </>
-              )}
-              {modelDataTab === "profiles" && (
-                <>
-                  פרופילים ייחודיים: {formatCount(aggregatedProfilesTabRows.length)} · פריטי IFC:{" "}
-                  {formatCount(filteredParts.length)}
-                </>
-              )}
-            </div>
-          )}
-
-          <div className="max-h-[calc(100vh-11rem)] overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/30 p-2">
+          <div
+            className={`${VIEWER_SIDE_PANEL_SCROLL} min-h-0 flex-1 overflow-auto p-1.5`}
+          >
             {assemblyStructureNotice ? (
-              <p className="px-1 text-sm leading-relaxed text-zinc-200">{ASSEMBLY_STRUCTURE_NOTICE_HE}</p>
+              <p className="px-1 text-sm leading-relaxed text-zinc-700">{ASSEMBLY_STRUCTURE_NOTICE_HE}</p>
             ) : selectedAssembly ? (
               <AssemblyPickDetailPanel
                 assembly={selectedAssembly}
                 allAssemblies={analyzerData?.assemblies ?? []}
                 onSelectPartInstances={(instances) => void selectPartInstances(instances)}
-                onBackToList={() => void selectAssembly(null)}
               />
             ) : selectedPart ? (
               <PartPickDetailPanel
@@ -1739,24 +1754,24 @@ export default function ViewerPage() {
               />
             ) : (
               <>
-                <div className="mb-2 flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
+                <div className="mb-2 flex gap-1 rounded-xl border border-zinc-300 bg-zinc-200/70 p-1">
                   <button
                     type="button"
                     className={`flex-1 rounded-md px-2 py-2 text-xs font-medium transition-colors ${
                       modelDataTab === "assemblies"
-                        ? "bg-zinc-700 text-zinc-100"
-                        : "text-zinc-400 hover:bg-zinc-800/80"
+                        ? "bg-white text-zinc-950 shadow-sm"
+                        : "text-zinc-600 hover:bg-white/70"
                     }`}
                     onClick={() => setModelDataTab("assemblies")}
                   >
-                    הרכבות
+                    אמסבלי
                   </button>
                   <button
                     type="button"
                     className={`flex-1 rounded-md px-2 py-2 text-xs font-medium transition-colors ${
                       modelDataTab === "parts"
-                        ? "bg-zinc-700 text-zinc-100"
-                        : "text-zinc-400 hover:bg-zinc-800/80"
+                        ? "bg-white text-zinc-950 shadow-sm"
+                        : "text-zinc-600 hover:bg-white/70"
                     }`}
                     onClick={() => setModelDataTab("parts")}
                   >
@@ -1766,8 +1781,8 @@ export default function ViewerPage() {
                     type="button"
                     className={`flex-1 rounded-md px-2 py-2 text-xs font-medium transition-colors ${
                       modelDataTab === "profiles"
-                        ? "bg-zinc-700 text-zinc-100"
-                        : "text-zinc-400 hover:bg-zinc-800/80"
+                        ? "bg-white text-zinc-950 shadow-sm"
+                        : "text-zinc-600 hover:bg-white/70"
                     }`}
                     onClick={() => setModelDataTab("profiles")}
                   >
@@ -1777,7 +1792,7 @@ export default function ViewerPage() {
 
                 {modelDataTab === "assemblies" && (
                   <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
+                    <thead className="sticky -top-1.5 z-10 bg-[#eef1f3] text-[10px] text-zinc-500">
                       <tr>
                         <th className="p-2 text-right font-medium">מספר הרכבה</th>
                         <th className="p-2 text-right font-medium">כמות</th>
@@ -1789,11 +1804,11 @@ export default function ViewerPage() {
                         <tr
                           key={row.key}
                           onClick={() => void selectAggregatedAssemblyRow(row)}
-                          className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-800/90"
+                          className="cursor-pointer border-t border-zinc-200 hover:bg-zinc-200/70"
                         >
-                          <td className="p-2 font-medium text-zinc-100">{row.displayMark}</td>
-                          <td className="p-2 text-zinc-300">{formatCount(row.qty)}</td>
-                          <td className="whitespace-nowrap p-2 text-zinc-300">
+                          <td className="p-2 font-medium text-zinc-900">{row.displayMark}</td>
+                          <td className="p-2 text-zinc-700">{formatCount(row.qty)}</td>
+                          <td className="whitespace-nowrap p-2 text-zinc-700">
                             <span dir="ltr">{formatKgPlain(row.totalWeightKg)}</span>
                           </td>
                         </tr>
@@ -1802,17 +1817,10 @@ export default function ViewerPage() {
                   </table>
                 )}
 
-                {modelDataTab === "assemblies" && aggregatedAssemblies.length > 0 && (
-                  <p className="mt-2 px-1 text-[11px] leading-snug text-zinc-500">
-                    כמות = כמה פעמים אותה הרכבה (לפי מספר הרכבה) מופיעה במודל. משקל = סכום משקלי כל
-                    המופעים.
-                  </p>
-                )}
-
                 {modelDataTab === "parts" && (
                   <>
                     <table className="w-full text-xs">
-                      <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
+                      <thead className="sticky -top-1.5 z-10 bg-[#eef1f3] text-[10px] text-zinc-500">
                         <tr>
                           <th className="p-2 text-right font-medium">מספר חלק</th>
                           <th className="p-2 text-right font-medium">פרופיל</th>
@@ -1825,10 +1833,10 @@ export default function ViewerPage() {
                           <tr
                             key={row.key}
                             onClick={() => void selectPartInstances(row.instances)}
-                            className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-800/90"
+                            className="cursor-pointer border-t border-zinc-200 hover:bg-zinc-200/70"
                           >
-                            <td className="p-2 font-medium text-zinc-100">{row.displayMark}</td>
-                            <td className="p-2 text-zinc-300">
+                            <td className="p-2 font-medium text-zinc-900">{row.displayMark}</td>
+                            <td className="p-2 text-zinc-700">
                               {row.displayProfile === "ללא שם" ? (
                                 row.displayProfile
                               ) : (
@@ -1837,27 +1845,21 @@ export default function ViewerPage() {
                                 </span>
                               )}
                             </td>
-                            <td className="p-2 text-zinc-300">{formatQuantityInt(row.effectiveQty)}</td>
-                            <td className="whitespace-nowrap p-2 text-zinc-300">
+                            <td className="p-2 text-zinc-700">{formatQuantityInt(row.effectiveQty)}</td>
+                            <td className="whitespace-nowrap p-2 text-zinc-700">
                               <span dir="ltr">{formatKgPlain(row.totalWeightKg)}</span>
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                    {aggregatedPartsTabRows.length > 0 && (
-                      <p className="mt-2 px-1 text-[11px] leading-snug text-zinc-500">
-                        מיון עולה לפי מספר חלק. חלקים זהים (מספר חלק / פרופיל / שם / משקל ליחידה)
-                        בשורה אחת; כמות = כפילויות במודל או Quantity מהמודל; משקל = סכום כל הפריטים.
-                      </p>
-                    )}
                   </>
                 )}
 
                 {modelDataTab === "profiles" && (
                   <>
                     <table className="w-full text-xs">
-                      <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
+                      <thead className="sticky -top-1.5 z-10 bg-[#eef1f3] text-[10px] text-zinc-500">
                         <tr>
                           <th className="p-2 text-right font-medium">שם הפרופיל</th>
                           <th className="p-2 text-right font-medium">כמות</th>
@@ -1869,9 +1871,9 @@ export default function ViewerPage() {
                           <tr
                             key={row.key}
                             onClick={() => void selectProfileGroupRow(row)}
-                            className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-800/90"
+                            className="cursor-pointer border-t border-zinc-200 hover:bg-zinc-200/70"
                           >
-                            <td className="p-2 font-medium text-zinc-100">
+                            <td className="p-2 font-medium text-zinc-900">
                               {row.profileLabel === "ללא שם" ? (
                                 row.profileLabel
                               ) : (
@@ -1880,20 +1882,14 @@ export default function ViewerPage() {
                                 </span>
                               )}
                             </td>
-                            <td className="p-2 text-zinc-300">{formatCount(row.totalQty)}</td>
-                            <td className="whitespace-nowrap p-2 text-zinc-300">
+                            <td className="p-2 text-zinc-700">{formatCount(row.totalQty)}</td>
+                            <td className="whitespace-nowrap p-2 text-zinc-700">
                               <span dir="ltr">{formatKgPlain(row.totalWeightKg)}</span>
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                    {aggregatedProfilesTabRows.length > 0 && (
-                      <p className="mt-2 px-1 text-[11px] leading-snug text-zinc-500">
-                        מיון עולה לפי שם פרופיל. כמות = סכום יחידות מכל החלקים עם אותו פרופיל (Quantity מהמודל או 1
-                        לישות); משקל = סכום משקלי כל הפריטים.
-                      </p>
-                    )}
                   </>
                 )}
               </>
