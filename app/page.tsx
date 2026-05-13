@@ -7,7 +7,13 @@ import { Card } from "@/components/ui/card";
 import { he } from "@/lib/i18n/he";
 import { useAppStore } from "@/lib/state/app-store";
 
-const ANALYZER_API_URL = process.env.NEXT_PUBLIC_ANALYZER_API_URL?.replace(/\/$/, "");
+const RAW_ANALYZER_API_URL = process.env.NEXT_PUBLIC_ANALYZER_API_URL?.trim();
+const ANALYZER_API_URL = RAW_ANALYZER_API_URL
+  ? (RAW_ANALYZER_API_URL.match(/^https?:\/\//i)
+      ? RAW_ANALYZER_API_URL
+      : `https://${RAW_ANALYZER_API_URL}`
+    ).replace(/\/$/, "")
+  : "";
 
 export default function HomePage() {
   const router = useRouter();
