@@ -188,9 +188,14 @@ export class ViewerEngine {
   private pickPriorityMode: "all" | "right-click" = "all";
   private readonly pickPriorityRaycaster = new THREE.Raycaster();
   /**
-   * World point the camera orbits/trucks/dollies around — same source of truth for (1) element tap
-   * picks and (2) canvas gestures: both use {@link OBC.FastModelPickers#getFullPick} when available.
-   * Cleared on miss tap, programmatic camera moves, fit/reset (see {@link clearStoredPickOrbitPivot}).
+   * World point the camera orbits/trucks/dollies around — single source of truth for (1) element tap
+   * picks and (2) canvas gestures.
+   *
+   * Sticky by design: once seeded (by a tap on steel or by the first canvas gesture's sync raycast),
+   * it persists across deselects and empty-canvas taps so every subsequent orbit/pan/dolly feels
+   * identical to the "picked element" case. Cleared only on programmatic camera teleports
+   * (resetView, applyViewMode, restoreCameraRevertSnapshot, focusBboxMap, etc.) — see
+   * {@link clearStoredPickOrbitPivot}.
    */
   private pickOrbitPivotActive = false;
   private readonly pickOrbitPivotWorld = new THREE.Vector3();
@@ -234,12 +239,6 @@ export class ViewerEngine {
   /** Cursor-based orbit pivot for pan/dolly/wheel (see {@link installPerspectiveOrbitPivotFromCursor}). */
   private readonly orbitPivotRaycaster = new THREE.Raycaster();
   private readonly orbitPivotScratchCenter = new THREE.Vector3();
-  private readonly orbitPivotScratchSize = new THREE.Vector3();
-  private readonly orbitPivotScratchHit = new THREE.Vector3();
-  private readonly orbitPivotScratchToHit = new THREE.Vector3();
-  private readonly orbitPivotScratchViewDir = new THREE.Vector3();
-  private readonly orbitFallbackSphere = new THREE.Sphere();
-  private readonly orbitFallbackPlane = new THREE.Plane();
   private orbitPivotControlStartHandler: (() => void) | null = null;
   /**
    * מבט orthographic: camera-controls’ built-in ortho `dollyToCursor` path is tied to smoothed `_zoom`
@@ -761,9 +760,9 @@ export class ViewerEngine {
     const span = Math.max(size.x, size.y, size.z, 1);
     const distance = ORTHO_DISTANCE_K * span;
 
+    const mode = this.userClipDirection;
     this.updateOrthoFrustum(box, true, mode);
 
-    const mode = this.userClipDirection;
     const simpleCam = this.world.camera as OBC.SimpleCamera;
     const ctrl = simpleCam.controls;
     const ortho = this.orthographicCamera;
@@ -1186,9 +1185,12 @@ export class ViewerEngine {
   }
 
   /**
-   * Same camera anchor as a tap on steel: sync ray fallback immediately, then {@link OBC.FastModelPickers#getFullPick}
-   * to set {@link pickOrbitPivotWorld} / {@link pickOrbitPivotActive} (no selection callback).
-   * Perspective wheel zoom does not use this — it relies on {@link CameraControls#dollyToCursor}.
+   * Seed a fresh sticky orbit pivot from the current cursor position using only the **sync** raycast
+   * path (OBC raycaster + CPU mesh intersect; sticky pivot / model centroid otherwise).
+   *
+   * Intentionally does not chain to an async `getFullPick`: a late GPU result arriving mid-rotate
+   * would snap the pivot, which is exactly the inconsistency the picked-element path avoids. The
+   * sync path is precise enough on the current frame and stays stable for the entire gesture.
    */
   private applyOrbitPivotFromModelPickLikeTap(ndc: THREE.Vector2, controls: CameraControls): void {
     const pSync = this.worldOrbitPointFromPerspectiveNdc(ndc.clone());
@@ -1197,26 +1199,6 @@ export class ViewerEngine {
     void controls.stop?.();
     controls.setOrbitPoint(pSync.x, pSync.y, pSync.z);
     void controls.update?.(0);
-
-    const fragments = this.components.get(OBC.FragmentsManager);
-    if (!fragments.initialized) return;
-    const ndcCopy = ndc.clone();
-    void (async () => {
-      try {
-        const pickers = this.components.get(OBC.FastModelPickers);
-        const picker = pickers.get(this.world);
-        const full = await picker.getFullPick(ndcCopy);
-        if (this.disposed) return;
-        if (full && typeof full.localId === "number") {
-          this.pickOrbitPivotWorld.copy(full.point);
-          void controls.stop?.();
-          controls.setOrbitPoint(full.point.x, full.point.y, full.point.z);
-          void controls.update?.(0);
-        }
-      } catch {
-        /* fragment GPU pick may fail transiently — keep pSync */
-      }
-    })();
   }
 
   /**
@@ -1317,23 +1299,32 @@ export class ViewerEngine {
   }
 
   /**
-   * World point on the cursor ray for {@link CameraControls#setOrbitPoint} — same depth idea as
-   * a model tap: ray vs mesh, else bounding sphere / plane through model center, else along the ray.
+   * Stable orbit pivot for canvas gestures.
+   *
+   * Order of preference:
+   *   1. ThatOpen sync raycast hits a fragment surface under the cursor.
+   *   2. Direct CPU mesh intersect on positions buffers.
+   *   3. The current sticky pivot ({@link pickOrbitPivotWorld}) if one exists — matches the
+   *      picked-element experience exactly: empty-canvas gestures keep using the last good point
+   *      instead of inventing a new one from cursor-ray fallbacks.
+   *   4. Model centroid (first gesture only, before any pivot has ever been seeded).
+   *
+   * Deliberately no bounding-sphere / view-plane / distance-along-ray fallbacks: those produced
+   * three different orbit radii depending on where the cursor happened to land, which is what made
+   * empty-canvas orbit feel inconsistent.
    */
   private worldOrbitPointFromPerspectiveNdc(ndc: THREE.Vector2): THREE.Vector3 {
     const cam = this.world.camera.three;
-    const ctrl = this.world.camera.controls as CameraControls | undefined;
     if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
-      return new THREE.Vector3();
+      return this.pickOrbitPivotActive ? this.pickOrbitPivotWorld.clone() : new THREE.Vector3();
     }
     const persp = cam as THREE.PerspectiveCamera;
-    this.orbitPivotRaycaster.setFromCamera(ndc, persp);
-    const ray = this.orbitPivotRaycaster.ray;
 
     if (this.modelObject) {
       const thatOpenPt = this.tryWorldPointFromThatOpenRaycast(ndc);
       if (thatOpenPt) return thatOpenPt;
       try {
+        this.orbitPivotRaycaster.setFromCamera(ndc, persp);
         const targets = this.collectMeshesWithCpuPosition(this.modelObject);
         if (targets.length > 0) {
           const hits = this.orbitPivotRaycaster.intersectObjects(targets, false);
@@ -1342,39 +1333,19 @@ export class ViewerEngine {
       } catch {
         /* BVH / attribute edge cases on individual meshes */
       }
+    }
+
+    if (this.pickOrbitPivotActive) {
+      return this.pickOrbitPivotWorld.clone();
+    }
+
+    if (this.modelObject) {
       const box = new THREE.Box3().setFromObject(this.modelObject);
       if (!box.isEmpty()) {
-        box.getCenter(this.orbitPivotScratchCenter);
-        const span = box.getSize(this.orbitPivotScratchSize).length();
-        box.getBoundingSphere(this.orbitFallbackSphere);
-        if (ray.intersectSphere(this.orbitFallbackSphere, this.orbitPivotScratchHit)) {
-          this.orbitPivotScratchToHit.subVectors(this.orbitPivotScratchHit, ray.origin);
-          if (ray.direction.dot(this.orbitPivotScratchToHit) > 0) {
-            return this.orbitPivotScratchHit.clone();
-          }
-        }
-        persp.getWorldDirection(this.orbitPivotScratchViewDir);
-        this.orbitFallbackPlane.setFromNormalAndCoplanarPoint(
-          this.orbitPivotScratchViewDir,
-          this.orbitPivotScratchCenter,
-        );
-        if (ray.intersectPlane(this.orbitFallbackPlane, this.orbitPivotScratchHit)) {
-          this.orbitPivotScratchToHit.subVectors(this.orbitPivotScratchHit, ray.origin);
-          if (ray.direction.dot(this.orbitPivotScratchToHit) > 1e-6) {
-            return this.orbitPivotScratchHit.clone();
-          }
-        }
-        const d0 =
-          ctrl && Number.isFinite(ctrl.distance) ? ctrl.distance : Math.max(8, span * 0.35);
-        /** Avoid `Math.max(1, d0)`: when zoomed very close, spherical distance can be under one unit;
-         * forcing a 1 unit minimum along the ray misses the surface under the cursor. */
-        const tAlong = Math.max(persp.near * 24, d0);
-        return ray.at(tAlong, new THREE.Vector3());
+        return box.getCenter(this.orbitPivotScratchCenter).clone();
       }
     }
-    const d1 = ctrl && Number.isFinite(ctrl.distance) && ctrl.distance > 0 ? ctrl.distance : 25;
-    const tAlongNoModel = Math.max(persp.near * 24, d1);
-    return ray.at(tAlongNoModel, new THREE.Vector3());
+    return new THREE.Vector3();
   }
 
   /**
@@ -2266,9 +2237,13 @@ export class ViewerEngine {
             c.setOrbitPoint(full.point.x, full.point.y, full.point.z);
             void c.update?.(0);
           }
-        } else {
-          this.clearStoredPickOrbitPivot();
         }
+        /**
+         * Miss-tap deliberately does not clear the sticky pivot — keeping it makes empty-canvas
+         * orbit/pan/dolly behave identically to the picked-element case (single stable pivot per
+         * camera pose). Pivot is invalidated only on programmatic camera teleports (resetView,
+         * applyViewMode, restoreCameraRevertSnapshot, focusBboxMap).
+         */
       } catch (error) {
         console.error("[picker] gpu pick failed:", error);
         return;
