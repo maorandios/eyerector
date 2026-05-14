@@ -241,6 +241,13 @@ export class ViewerEngine {
   private readonly orbitPivotScratchCenter = new THREE.Vector3();
   private orbitPivotControlStartHandler: (() => void) | null = null;
   /**
+   * Wheel events in `camera-controls` only dispatch a `control` event (not `controlstart`),
+   * so the pivot must be re-seeded from a direct wheel listener — otherwise the stored pivot
+   * stays stale after a dolly and the next rotation snaps the orbit back around the old point.
+   */
+  private wheelDollyPivotReseedHandler: ((event: WheelEvent) => void) | null = null;
+  private readonly wheelDollyPivotNdc = new THREE.Vector2();
+  /**
    * מבט orthographic: camera-controls’ built-in ortho `dollyToCursor` path is tied to smoothed `_zoom`
    * and often never applies a visible target shift. We handle wheel on the host in capture phase
    * (before the canvas listener) using the same unproject/lerp/pullback as the library, then block the
@@ -470,6 +477,7 @@ export class ViewerEngine {
 
     this.installPointerListeners();
     this.installPerspectiveOrbitPivotFromCursor();
+    this.installPerspectiveWheelPivotReseed();
     this.installOrthoViewZoomTowardCursor();
     /* Ensure the host div (not only the canvas) never scrolls the page instead of delivering gestures. */
     this.container.style.touchAction = "none";
@@ -1093,26 +1101,81 @@ export class ViewerEngine {
       if (!movesCamera) return;
 
       /**
-       * After an element tap, keep orbit anchored to that hit until a new gesture re-seeds pivot
-       * (below). Pan/zoom/dolly stay on the same sticky orbit point without re-scanning ray each time.
+       * The pivot is anchored ONCE per "intent" (pick, canvas tap with a hit, or wheel-zoom over
+       * geometry — see {@link installPerspectiveWheelPivotReseed}) and stays locked across many
+       * gestures. Re-anchoring per gesture changes the orbit radius each drag and makes the
+       * motion feel inconsistent. So when a sticky pivot already exists we reuse it
+       * unconditionally; we only seed a fresh one when there is none (first gesture after a
+       * programmatic teleport).
        */
-      if (isRotateOnly && this.pickOrbitPivotActive) {
-        void controls.stop?.();
-        controls.setOrbitPoint(
-          this.pickOrbitPivotWorld.x,
-          this.pickOrbitPivotWorld.y,
-          this.pickOrbitPivotWorld.z,
-        );
-        void controls.update?.(0);
-        return;
-      }
-      if (!isRotateOnly && this.pickOrbitPivotActive) {
+      if (this.pickOrbitPivotActive) {
+        if (isRotateOnly) {
+          void controls.stop?.();
+          controls.setOrbitPoint(
+            this.pickOrbitPivotWorld.x,
+            this.pickOrbitPivotWorld.y,
+            this.pickOrbitPivotWorld.z,
+          );
+          void controls.update?.(0);
+        }
         return;
       }
 
       this.applyOrbitPivotFromModelPickLikeTap(this.lastPointerNdc, controls);
     };
     controls.addEventListener("controlstart", this.orbitPivotControlStartHandler);
+  }
+
+  /**
+   * Wheel-zoom is the user's "I want to look at this" gesture — same status as picking an
+   * element. `camera-controls` never fires `controlstart` for wheel events (only the generic
+   * `control` event), so the {@link orbitPivotControlStartHandler} cannot catch it.
+   *
+   * Two non-obvious constraints shaped this listener:
+   *
+   * 1. **Register on `window` with capture phase**, not on the canvas. Listeners on the same
+   *    DOM target fire in registration order, and `camera-controls` registers its wheel
+   *    handler before we get the chance — so a capture-phase listener on the same canvas does
+   *    not actually run earlier. Registering on `window` lets us run during the capture
+   *    descent, before any element-level listener (ours or library-owned) fires.
+   *
+   * 2. **Do NOT call `setOrbitPoint(hit)` here.** That helper internally calls
+   *    `dollyTo(distanceFromCameraToHit, false)` which writes `_sphericalEnd.radius` and
+   *    `_spherical.radius` — overwriting the new radius `camera-controls` just set from the
+   *    wheel and effectively cancelling the zoom. We only need to refresh the stored pivot;
+   *    the next rotation's `orbitPivotControlStartHandler` will call `setOrbitPoint` once the
+   *    camera has settled at the post-zoom position, computing the correct radius then.
+   */
+  private installPerspectiveWheelPivotReseed(): void {
+    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
+    if (!canvas) return;
+
+    this.wheelDollyPivotReseedHandler = (event: WheelEvent) => {
+      if (this.disposed || this.activeOrthoViewMode !== null) return;
+      const cam = this.world.camera.three;
+      if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) return;
+
+      const tn = event.target;
+      if (!(tn instanceof Node) || (tn !== canvas && !canvas.contains(tn))) return;
+
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      this.wheelDollyPivotNdc.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+
+      const fresh = this.tryFreshPivotFromCursor(this.wheelDollyPivotNdc);
+      if (!fresh) return;
+
+      this.pickOrbitPivotWorld.copy(fresh);
+      this.pickOrbitPivotActive = true;
+    };
+
+    window.addEventListener("wheel", this.wheelDollyPivotReseedHandler, {
+      capture: true,
+      passive: true,
+    });
   }
 
   private installOrthoViewZoomTowardCursor(): void {
@@ -1299,41 +1362,54 @@ export class ViewerEngine {
   }
 
   /**
-   * Stable orbit pivot for canvas gestures.
+   * Sync raycast at `ndc` against the model. Returns the world hit only when the cursor is
+   * actually over a visible surface (ThatOpen fragment raycast or CPU mesh intersect). Used by
+   * the controlstart handler to re-anchor the orbit pivot to whatever the user can see under
+   * their cursor at the start of every gesture — same effect as tapping that element, without
+   * requiring a selection.
+   *
+   * Returns `null` when the cursor is over empty space so callers can decide whether to keep the
+   * current sticky pivot or fall back to the model centroid.
+   */
+  private tryFreshPivotFromCursor(ndc: THREE.Vector2): THREE.Vector3 | null {
+    const cam = this.world.camera.three;
+    if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) return null;
+    if (!this.modelObject) return null;
+
+    const thatOpenPt = this.tryWorldPointFromThatOpenRaycast(ndc);
+    if (thatOpenPt) return thatOpenPt;
+
+    try {
+      const persp = cam as THREE.PerspectiveCamera;
+      this.orbitPivotRaycaster.setFromCamera(ndc, persp);
+      const targets = this.collectMeshesWithCpuPosition(this.modelObject);
+      if (targets.length > 0) {
+        const hits = this.orbitPivotRaycaster.intersectObjects(targets, false);
+        if (hits.length > 0) return hits[0].point.clone();
+      }
+    } catch {
+      /* BVH / attribute edge cases on individual meshes */
+    }
+    return null;
+  }
+
+  /**
+   * Stable orbit pivot for canvas gestures — fallback wrapper around {@link tryFreshPivotFromCursor}.
    *
    * Order of preference:
-   *   1. ThatOpen sync raycast hits a fragment surface under the cursor.
-   *   2. Direct CPU mesh intersect on positions buffers.
-   *   3. The current sticky pivot ({@link pickOrbitPivotWorld}) if one exists — matches the
-   *      picked-element experience exactly: empty-canvas gestures keep using the last good point
+   *   1. Fresh sync raycast hit under the cursor (fragment surface or CPU mesh).
+   *   2. The current sticky pivot ({@link pickOrbitPivotWorld}) if one exists — matches the
+   *      picked-element experience: cursor over empty space keeps using the last good point
    *      instead of inventing a new one from cursor-ray fallbacks.
-   *   4. Model centroid (first gesture only, before any pivot has ever been seeded).
+   *   3. Model centroid (first gesture only, before any pivot has ever been seeded).
    *
    * Deliberately no bounding-sphere / view-plane / distance-along-ray fallbacks: those produced
    * three different orbit radii depending on where the cursor happened to land, which is what made
    * empty-canvas orbit feel inconsistent.
    */
   private worldOrbitPointFromPerspectiveNdc(ndc: THREE.Vector2): THREE.Vector3 {
-    const cam = this.world.camera.three;
-    if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
-      return this.pickOrbitPivotActive ? this.pickOrbitPivotWorld.clone() : new THREE.Vector3();
-    }
-    const persp = cam as THREE.PerspectiveCamera;
-
-    if (this.modelObject) {
-      const thatOpenPt = this.tryWorldPointFromThatOpenRaycast(ndc);
-      if (thatOpenPt) return thatOpenPt;
-      try {
-        this.orbitPivotRaycaster.setFromCamera(ndc, persp);
-        const targets = this.collectMeshesWithCpuPosition(this.modelObject);
-        if (targets.length > 0) {
-          const hits = this.orbitPivotRaycaster.intersectObjects(targets, false);
-          if (hits.length > 0) return hits[0].point.clone();
-        }
-      } catch {
-        /* BVH / attribute edge cases on individual meshes */
-      }
-    }
+    const fresh = this.tryFreshPivotFromCursor(ndc);
+    if (fresh) return fresh;
 
     if (this.pickOrbitPivotActive) {
       return this.pickOrbitPivotWorld.clone();
@@ -4099,6 +4175,10 @@ export class ViewerEngine {
           capture: true,
         });
         this.orthoViewWheelCaptureHandler = null;
+      }
+      if (this.wheelDollyPivotReseedHandler) {
+        window.removeEventListener("wheel", this.wheelDollyPivotReseedHandler, { capture: true });
+        this.wheelDollyPivotReseedHandler = null;
       }
       const camCtrl = this.world.camera.controls as CameraControls | undefined;
       if (camCtrl && this.orbitPivotControlStartHandler) {
