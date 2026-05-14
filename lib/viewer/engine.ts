@@ -5,7 +5,7 @@ import * as OBC from "@thatopen/components";
 import * as OBF from "@thatopen/components-front";
 import CameraControls from "camera-controls";
 import { LodMode, type FragmentsModel, type MeshData } from "@thatopen/fragments";
-import type { AnalyzerOutput, ViewerMode } from "@/types/domain";
+import type { AnalyzerBoltRow, AnalyzerOutput, ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
 import { normalizeIfcGuidKey } from "@/lib/viewer/ifc-guid";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
@@ -113,6 +113,36 @@ export type ApplyIsolationOptions = {
    * so base plates / merged hardware still draw when per-seed `getItemsGeometry` is empty.
    */
   inspectionReadableSketch?: boolean;
+  /**
+   * מצב ייצור: after the standard isolation merges run, remove every fragment local that
+   * {@link ViewerEngine.resolveMechanicalFastenerLocalsToHide} classifies as a fastener (bolts /
+   * nuts / washers / Tekla discrete-accessory hardware), while keeping opening / surface-feature
+   * holes inside the isolated subset. The result: the steel part(s) keep their cut hole geometry
+   * visible, but the standalone bolt-nut-washer shapes that normally pile on top of the hole are
+   * hidden — the user sees "where the holes are" without the hardware silhouette covering them.
+   *
+   * Uses the same fastener classifier as the global "הסתר ברגים, השאר חורים" toolbar toggle so
+   * holes (`IfcOpeningElement`, `IfcSurfaceFeature` bore meshes, etc.) stay visible.
+   */
+  hideBoltsKeepHoles?: boolean;
+};
+
+/**
+ * Synthetic bolt‑hole cylinders for מצב ייצור when IFC exports omit `IfcOpeningElement` voids
+ * but still expose fastener solids + hole diameters on bolt property sets.
+ */
+export type ProductionHoleOverlayInput = {
+  boltSteelLinks: readonly { boltGlobalId: string; partGlobalId: string }[];
+  bolts: readonly Pick<AnalyzerBoltRow, "id" | "expressId" | "boltHoleDiameterMm">[];
+  /** Analyzer steel part GlobalIds (`id`) for the isolated production subset — used to filter `boltSteelLinks`. */
+  visibleSteelPartIds: readonly string[];
+  /**
+   * Extra bolts to draw (merged from {@link analyzerBoltsForProductionHoleOverlay}) when
+   * `boltSteelLinks` uses GUIDs that do not match assembly `parts` / Tekla omits relations.
+   */
+  overlayBoltRows?: readonly Pick<AnalyzerBoltRow, "id" | "expressId" | "boltHoleDiameterMm">[];
+  /** Already resolved production subset locals; used as a direct fastener-source fallback. */
+  candidateLocalIds?: readonly number[];
 };
 
 export type ViewerToolMode = "none" | "measurement" | "flash";
@@ -156,6 +186,119 @@ const LONG_SINGLE_STEEL_DIAGONAL_M = 2.0;
  * Loose category match for spatial queries — supplements IFC graph when exporters omit connects.
  */
 const FASTENER_ITEMS_BY_QUERY_REGEX: RegExp[] = [/MECHANICALFASTENER/i, /\bIFCFASTENER\b/i, /DISCRETEACCESSORY/i];
+
+/** One decoded fragment sample (model-object space) before collinearity clustering. */
+type ProductionSampleCandidate = { pos: THREE.Vector3; axis: THREE.Vector3 };
+
+/** Max perpendicular distance (m) between sample origins for “same bolt” merge (head/shank/nut solids). */
+const BOLT_SAMPLE_CLUSTER_PERP_TOL_M = 0.028;
+
+function clusterFastenerSamplesByCollinearity(
+  candidates: ProductionSampleCandidate[],
+  perpTol: number,
+): ProductionSampleCandidate[][] {
+  const n = candidates.length;
+  if (n === 0) return [];
+  const parent = new Int32Array(n);
+  for (let i = 0; i < n; i++) parent[i] = i;
+  const find = (i: number): number => {
+    let r = i;
+    while (parent[r] !== r) r = parent[r];
+    while (parent[i] !== i) {
+      const next = parent[i];
+      parent[i] = r;
+      i = next;
+    }
+    return r;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+  for (let i = 0; i < n; i++) {
+    const ai = candidates[i].axis;
+    const pi = candidates[i].pos;
+    for (let j = i + 1; j < n; j++) {
+      const aj = candidates[j].axis;
+      if (Math.abs(ai.dot(aj)) < 0.96) continue;
+      const dx = candidates[j].pos.x - pi.x;
+      const dy = candidates[j].pos.y - pi.y;
+      const dz = candidates[j].pos.z - pi.z;
+      const along = dx * ai.x + dy * ai.y + dz * ai.z;
+      const px = dx - along * ai.x;
+      const py = dy - along * ai.y;
+      const pz = dz - along * ai.z;
+      if (px * px + py * py + pz * pz < perpTol * perpTol) {
+        union(i, j);
+      }
+    }
+  }
+  const byRoot = new Map<number, ProductionSampleCandidate[]>();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    let arr = byRoot.get(r);
+    if (!arr) {
+      arr = [];
+      byRoot.set(r, arr);
+    }
+    arr.push(candidates[i]);
+  }
+  return [...byRoot.values()];
+}
+
+/**
+ * Pick one hole reference per physical fastener cluster: closest to visible steel (hole mouth),
+ * else midpoint along the bolt axis in model space.
+ */
+function pickHoleLikeSampleForCluster(
+  cluster: ProductionSampleCandidate[],
+  steelWorld: THREE.Box3 | null,
+  modelObject: THREE.Object3D,
+  tmpWorld: THREE.Vector3,
+  tmpClosest: THREE.Vector3,
+): ProductionSampleCandidate {
+  if (cluster.length === 1) return cluster[0];
+  if (steelWorld && !steelWorld.isEmpty()) {
+    let best = cluster[0];
+    let bestD = Infinity;
+    for (const c of cluster) {
+      tmpWorld.copy(c.pos).applyMatrix4(modelObject.matrixWorld);
+      steelWorld.clampPoint(tmpWorld, tmpClosest);
+      const d2 = tmpWorld.distanceToSquared(tmpClosest);
+      if (d2 < bestD) {
+        bestD = d2;
+        best = c;
+      }
+    }
+    return best;
+  }
+  const axis = cluster[0].axis;
+  const bx = cluster[0].pos.x;
+  const by = cluster[0].pos.y;
+  const bz = cluster[0].pos.z;
+  let tMin = Infinity;
+  let tMax = -Infinity;
+  const tArr: number[] = new Array(cluster.length);
+  for (let k = 0; k < cluster.length; k++) {
+    const p = cluster[k].pos;
+    const t = (p.x - bx) * axis.x + (p.y - by) * axis.y + (p.z - bz) * axis.z;
+    tArr[k] = t;
+    tMin = Math.min(tMin, t);
+    tMax = Math.max(tMax, t);
+  }
+  const target = (tMin + tMax) / 2;
+  let best = cluster[0];
+  let bestErr = Infinity;
+  for (let k = 0; k < cluster.length; k++) {
+    const err = Math.abs(tArr[k] - target);
+    if (err < bestErr) {
+      bestErr = err;
+      best = cluster[k];
+    }
+  }
+  return best;
+}
 
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
@@ -234,6 +377,8 @@ export class ViewerEngine {
   private inspectionSessionFramingBox: THREE.Box3 | null = null;
   private readonly inspectionSceneBackground = new THREE.Color(0xf7f8fa);
   private viewerLightIntensityBackup: number[] | null = null;
+  /** ייצור: dark cylinder meshes indicating hole axes/diameters when fastener solids are hidden. */
+  private productionHoleOverlayGroup: THREE.Group | null = null;
   private readonly tmpVecEye = new THREE.Vector3();
   private readonly tmpClipNormal = new THREE.Vector3();
   /** Cursor-based orbit pivot for pan/dolly/wheel (see {@link installPerspectiveOrbitPivotFromCursor}). */
@@ -2591,6 +2736,825 @@ export class ViewerEngine {
   }
 
   /**
+   * Removes synthetic ייצור hole cylinders (own geometry — must dispose).
+   * Safe to call multiple times.
+   */
+  clearProductionHoleOverlays(): void {
+    this.disposeProductionHoleOverlays();
+  }
+
+  private disposeProductionHoleOverlays(): void {
+    const g = this.productionHoleOverlayGroup;
+    this.productionHoleOverlayGroup = null;
+    if (!g) return;
+    g.removeFromParent();
+    const materials = new Set<THREE.Material>();
+    g.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.geometry?.dispose();
+        const m = obj.material;
+        if (Array.isArray(m)) for (const x of m) materials.add(x);
+        else if (m) materials.add(m);
+      }
+    });
+    for (const m of materials) m.dispose();
+  }
+
+  private static productionSteelPartMatchesVisible(
+    partGlobalId: string,
+    visibleSteelPartIds: readonly string[],
+  ): boolean {
+    const raw = partGlobalId.trim();
+    const pNorm = normalizeIfcGuidKey(partGlobalId);
+    for (const v of visibleSteelPartIds) {
+      const vNorm = normalizeIfcGuidKey(v);
+      if (pNorm && vNorm && pNorm === vNorm) return true;
+      if (raw === v.trim()) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Draws dark translucent cylinders along each linked fastener’s world AABB long axis, sized from
+   * `boltHoleDiameterMm` (fallback: inferred from bolt mesh short cross‑section). Runs on the
+   * isolation queue so it stays ordered with `applyIsolation` / `clearIsolationVisuals`.
+   */
+  showProductionHoleOverlays(input: ProductionHoleOverlayInput): Promise<void> {
+    return this.enqueueIsolation(async () => {
+      this.disposeProductionHoleOverlays();
+      if (!this.modelObject || !this.modelId || input.visibleSteelPartIds.length === 0) return;
+
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (!fragments.initialized) return;
+      const fragModel = fragments.list.get(this.modelId);
+      if (!fragModel) return;
+
+      /** Normalized bolt key → exporter-spelled GlobalId (for `getLocalIdsByGuids`). */
+      const boltKeyToRawGuid = new Map<string, string>();
+      for (const link of input.boltSteelLinks ?? []) {
+        if (!ViewerEngine.productionSteelPartMatchesVisible(link.partGlobalId, input.visibleSteelPartIds)) {
+          continue;
+        }
+        const bk = normalizeIfcGuidKey(link.boltGlobalId) ?? link.boltGlobalId.trim();
+        if (!bk) continue;
+        if (!boltKeyToRawGuid.has(bk)) boltKeyToRawGuid.set(bk, link.boltGlobalId.trim());
+      }
+      for (const b of input.overlayBoltRows ?? []) {
+        const bk = normalizeIfcGuidKey(b.id) ?? b.id.trim();
+        if (!bk) continue;
+        if (!boltKeyToRawGuid.has(bk)) boltKeyToRawGuid.set(bk, b.id.trim());
+      }
+      const boltByKey = new Map<string, Pick<AnalyzerBoltRow, "id" | "expressId" | "boltHoleDiameterMm">>();
+      for (const b of input.bolts) {
+        const k = normalizeIfcGuidKey(b.id) ?? b.id.trim();
+        if (k) boltByKey.set(k, b);
+      }
+
+      type BoltWork = {
+        boltKey: string;
+        rawGuid: string;
+        row: Pick<AnalyzerBoltRow, "id" | "expressId" | "boltHoleDiameterMm"> | undefined;
+        localId: number | null;
+      };
+
+      const works: BoltWork[] = [];
+      for (const [boltKey, rawGuid] of boltKeyToRawGuid) {
+        works.push({
+          boltKey,
+          rawGuid,
+          row: boltByKey.get(boltKey),
+          localId: this.analyzerGuidKeyToFragmentLocal.get(boltKey) ?? null,
+        });
+      }
+
+      const seenLocalIds = new Set<number>();
+      const pushCandidateLocal = (localId: number) => {
+        if (!Number.isFinite(localId) || seenLocalIds.has(localId)) return;
+        seenLocalIds.add(localId);
+        works.push({
+          boltKey: `local:${localId}`,
+          rawGuid: `local:${localId}`,
+          row: undefined,
+          localId,
+        });
+      };
+
+      if (input.candidateLocalIds?.length) {
+        const candidateIds = [...new Set(input.candidateLocalIds)].filter((id) => Number.isFinite(id));
+        const CHUNK = 260;
+        for (let i = 0; i < candidateIds.length; i += CHUNK) {
+          const slice = candidateIds.slice(i, i + CHUNK);
+          try {
+            const rows = await fragModel.getItems(slice);
+            for (const lid of slice) {
+              const raw = rows.get(lid);
+              const cat = typeof raw?.category === "string" ? raw.category.toUpperCase() : "";
+              if (
+                cat.includes("MECHANICALFASTENER") ||
+                cat.includes("IFCFASTENER") ||
+                (cat.includes("FASTENER") && !cat.includes("GRID")) ||
+                cat.includes("DISCRETEACCESSORY")
+              ) {
+                pushCandidateLocal(lid);
+              }
+            }
+          } catch {
+            /* ignore candidate chunk */
+          }
+        }
+      }
+
+      /**
+       * Debug/reference fallback: do not trust analyzer links. Query every fastener-like item from
+       * fragments, then keep only bboxes that sit close to the selected production steel bbox.
+       */
+      let productionProbeBox: THREE.Box3 | null = null;
+      /** Union of isolated steel AABBs in scene/world space — hole markers hug this surface. */
+      let steelRefBoxWorld: THREE.Box3 | null = null;
+      let productionSteelDiag = 1;
+      try {
+        const steelMap = await this.modelIdMapForAnalyzerEntities(
+          input.visibleSteelPartIds.map((id) => ({ id, expressId: null })),
+        );
+        const steelBoxes = await fragments.getBBoxes(steelMap);
+        const steelBox = new THREE.Box3();
+        for (const box of steelBoxes) steelBox.union(box);
+        if (!steelBox.isEmpty()) {
+          steelRefBoxWorld = steelBox.clone();
+          const steelDiag = steelBox.getSize(new THREE.Vector3()).length();
+          productionSteelDiag = Math.max(steelDiag, 1);
+          const probeBox = steelBox.clone().expandByScalar(THREE.MathUtils.clamp(steelDiag * 0.08, 0.05, 0.45));
+          productionProbeBox = probeBox;
+          const rawFastenerIds = await fragModel.getItemsByQuery({
+            categories: FASTENER_ITEMS_BY_QUERY_REGEX,
+          });
+          const fastenerIds = Array.isArray(rawFastenerIds)
+            ? rawFastenerIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id))
+            : [];
+          const CHUNK = 160;
+          for (let i = 0; i < fastenerIds.length; i += CHUNK) {
+            const slice = fastenerIds.slice(i, i + CHUNK);
+            let boxes: THREE.Box3[];
+            try {
+              boxes = await fragments.getBBoxes({ [this.modelId]: new Set(slice) });
+            } catch {
+              continue;
+            }
+            for (let j = 0; j < slice.length; j++) {
+              const box = boxes[j];
+              if (!(box instanceof THREE.Box3) || box.isEmpty()) continue;
+              if (!probeBox.intersectsBox(box)) continue;
+              pushCandidateLocal(slice[j]);
+            }
+          }
+        }
+      } catch {
+        /* keep analyzer/candidate locals only */
+      }
+
+      const unresolved = works.filter((w) => w.localId == null);
+      if (unresolved.length > 0) {
+        const CHUNK = 120;
+        const sliceAll = unresolved.map((w) => w.rawGuid);
+        for (let i = 0; i < sliceAll.length; i += CHUNK) {
+          const slice = sliceAll.slice(i, i + CHUNK);
+          try {
+            const lids = await fragModel.getLocalIdsByGuids(slice);
+            for (let j = 0; j < slice.length; j++) {
+              const loc = lids[j];
+              const raw = slice[j];
+              const nk = normalizeIfcGuidKey(raw);
+              if (typeof loc === "number" && Number.isFinite(loc) && nk) {
+                this.analyzerGuidKeyToFragmentLocal.set(nk, loc);
+              }
+              for (const w of works) {
+                if (w.localId != null) continue;
+                if (
+                  w.rawGuid === raw ||
+                  normalizeIfcGuidKey(w.rawGuid) === nk ||
+                  normalizeIfcGuidKey(w.rawGuid) === normalizeIfcGuidKey(raw)
+                ) {
+                  if (typeof loc === "number" && Number.isFinite(loc)) w.localId = loc;
+                  break;
+                }
+              }
+            }
+          } catch {
+            /* ignore chunk */
+          }
+        }
+      }
+
+      const resolved = works.filter(
+        (w): w is BoltWork & { localId: number } =>
+          typeof w.localId === "number" && Number.isFinite(w.localId),
+      );
+
+      resolved.sort((a, b) => a.localId - b.localId);
+
+      const tmpPosition = new THREE.Vector3();
+      const tmpMatrix = new THREE.Matrix4();
+      const componentBoxesFromMeshData = (mesh: MeshData): THREE.Box3[] => {
+        if (!mesh.positions || mesh.positions.length < 9) return [];
+        const positions = mesh.positions;
+        const vertexCount = Math.floor(positions.length / 3);
+        const parent = new Int32Array(vertexCount);
+        for (let i = 0; i < vertexCount; i++) parent[i] = i;
+        const find = (i: number): number => {
+          let root = i;
+          while (parent[root] !== root) root = parent[root];
+          while (parent[i] !== i) {
+            const next = parent[i];
+            parent[i] = root;
+            i = next;
+          }
+          return root;
+        };
+        const union = (a: number, b: number) => {
+          const ra = find(a);
+          const rb = find(b);
+          if (ra !== rb) parent[rb] = ra;
+        };
+
+        const connectTriangle = (a: number, b: number, c: number) => {
+          if (a < vertexCount && b < vertexCount && c < vertexCount) {
+            union(a, b);
+            union(b, c);
+          }
+        };
+
+        if (mesh.indices && mesh.indices.length >= 3) {
+          for (let i = 0; i + 2 < mesh.indices.length; i += 3) {
+            connectTriangle(mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]);
+          }
+        } else {
+          for (let i = 0; i + 2 < vertexCount; i += 3) {
+            connectTriangle(i, i + 1, i + 2);
+          }
+        }
+
+        /** Non-indexed geometry often duplicates vertices per face; reconnect by shared position. */
+        const firstVertexByPosition = new Map<string, number>();
+        for (let i = 0; i < vertexCount; i++) {
+          const key = `${positions[i * 3].toFixed(5)},${positions[i * 3 + 1].toFixed(5)},${positions[
+            i * 3 + 2
+          ].toFixed(5)}`;
+          const prev = firstVertexByPosition.get(key);
+          if (prev == null) {
+            firstVertexByPosition.set(key, i);
+          } else {
+            union(prev, i);
+          }
+        }
+
+        const matrix =
+          mesh.transform instanceof THREE.Matrix4
+            ? mesh.transform
+            : Array.isArray(mesh.transform)
+              ? tmpMatrix.fromArray(mesh.transform)
+              : ArrayBuffer.isView(mesh.transform)
+                ? tmpMatrix.fromArray(Array.from(mesh.transform as ArrayLike<number>))
+                : null;
+        const boxes = new Map<number, THREE.Box3>();
+        for (let i = 0; i < vertexCount; i++) {
+          const root = find(i);
+          let box = boxes.get(root);
+          if (!box) {
+            box = new THREE.Box3();
+            boxes.set(root, box);
+          }
+          tmpPosition.fromArray(positions, i * 3);
+          if (matrix) tmpPosition.applyMatrix4(matrix);
+          box.expandByPoint(tmpPosition);
+        }
+        return [...boxes.values()].filter((box) => !box.isEmpty());
+      };
+
+      const fetchFallbackBoxForLocal = async (localId: number): Promise<THREE.Box3 | null> => {
+        try {
+          const arr = await fragments.getBBoxes({ [this.modelId!]: new Set([localId]) });
+          const b = arr[0];
+          return b instanceof THREE.Box3 && !b.isEmpty() ? b : null;
+        } catch {
+          return null;
+        }
+      };
+
+      const group = new THREE.Group();
+      group.name = "production-hole-overlays";
+
+      const zNormal = new THREE.Vector3(0, 0, 1);
+      const axisDir = new THREE.Vector3();
+      const quat = new THREE.Quaternion();
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      const markerKeys = new Set<string>();
+      const markerMaterial = new THREE.MeshBasicMaterial({
+        /** Solid hole reference — filled disc, not a ring mesh. */
+        color: 0xff1010,
+        transparent: false,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
+      });
+
+      /** `radius` = hole radius in model metres (typically {@link diameterM} / 2). */
+      const addMarkerDisc = (position: THREE.Vector3, normal: THREE.Vector3, radius: number) => {
+        const holeR = Math.max(radius, 0.003);
+        const key = `${position.x.toFixed(3)},${position.y.toFixed(3)},${position.z.toFixed(
+          3,
+        )}:${normal.x.toFixed(1)},${normal.y.toFixed(1)},${normal.z.toFixed(1)}:${holeR.toFixed(4)}`;
+        if (markerKeys.has(key)) return;
+        markerKeys.add(key);
+        const geom = new THREE.CircleGeometry(holeR, 64);
+        const mesh = new THREE.Mesh(geom, markerMaterial);
+        mesh.name = "production-bolt-hole-disc";
+        mesh.position.copy(position);
+        mesh.quaternion.copy(quat.setFromUnitVectors(zNormal, normal));
+        mesh.renderOrder = 20;
+        group.add(mesh);
+      };
+
+      /** All scene meshes carrying a fragment `tileId` (ThatOpen may attach more than one per tile in edge cases). */
+      const tileMeshesById = new Map<number, THREE.Mesh[]>();
+      this.modelObject.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const tileId = (mesh.userData as Record<string, unknown>).tileId;
+        if (typeof tileId !== "number") return;
+        const list = tileMeshesById.get(tileId) ?? [];
+        if (!list.includes(mesh)) list.push(mesh);
+        tileMeshesById.set(tileId, list);
+      });
+      this.modelObject.updateWorldMatrix(true, true);
+      const modelWorldInverse = new THREE.Matrix4().copy(this.modelObject.matrixWorld).invert();
+      const vertex = new THREE.Vector3();
+      const worldVertexFromAttribute = (
+        attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
+        vertexIndex: number,
+        matrixWorld: THREE.Matrix4,
+      ): THREE.Vector3 | null => {
+        try {
+          if (vertexIndex < 0 || vertexIndex >= attribute.count) return null;
+          vertex.fromBufferAttribute(attribute, vertexIndex);
+          if (!Number.isFinite(vertex.x) || !Number.isFinite(vertex.y) || !Number.isFinite(vertex.z)) {
+            return null;
+          }
+          vertex.applyMatrix4(matrixWorld).applyMatrix4(modelWorldInverse);
+          return vertex.clone();
+        } catch {
+          /** Some live tile chunks can point at transient/virtual geometry buffers; skip them. */
+          return null;
+        }
+      };
+      const componentBoxesFromLiveTileRange = (
+        pos: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
+        indexArray: ArrayLike<number> | null,
+        start: number,
+        count: number,
+        matrixWorld: THREE.Matrix4,
+      ): THREE.Box3[] => {
+        const end = start + count;
+        const nodeByVertexIndex = new Map<number, number>();
+        const points: THREE.Vector3[] = [];
+        const parent: number[] = [];
+        const find = (i: number): number => {
+          let root = i;
+          while (parent[root] !== root) root = parent[root];
+          while (parent[i] !== i) {
+            const next = parent[i];
+            parent[i] = root;
+            i = next;
+          }
+          return root;
+        };
+        const union = (a: number, b: number) => {
+          const ra = find(a);
+          const rb = find(b);
+          if (ra !== rb) parent[rb] = ra;
+        };
+        const getNode = (vertexIndex: number): number | null => {
+          if (vertexIndex < 0 || vertexIndex >= pos.count) return null;
+          const existing = nodeByVertexIndex.get(vertexIndex);
+          if (existing != null) return existing;
+          const p = worldVertexFromAttribute(pos, vertexIndex, matrixWorld);
+          if (!p) return null;
+          const node = points.length;
+          points.push(p);
+          parent.push(node);
+          nodeByVertexIndex.set(vertexIndex, node);
+          return node;
+        };
+        const connectTriangle = (a: number, b: number, c: number) => {
+          const na = getNode(a);
+          const nb = getNode(b);
+          const nc = getNode(c);
+          if (na == null || nb == null || nc == null) return;
+          union(na, nb);
+          union(nb, nc);
+        };
+
+        if (indexArray) {
+          const safeEnd = Math.min(end, indexArray.length);
+          for (let n = start; n + 2 < safeEnd; n += 3) {
+            connectTriangle(indexArray[n], indexArray[n + 1], indexArray[n + 2]);
+          }
+        } else {
+          const safeEnd = Math.min(end, pos.count);
+          for (let n = start; n + 2 < safeEnd; n += 3) {
+            connectTriangle(n, n + 1, n + 2);
+          }
+        }
+
+        /** Reconnect duplicated, non-indexed face vertices by identical transformed position. */
+        const byPosition = new Map<string, number>();
+        for (let i = 0; i < points.length; i++) {
+          const p = points[i];
+          const key = `${p.x.toFixed(5)},${p.y.toFixed(5)},${p.z.toFixed(5)}`;
+          const prev = byPosition.get(key);
+          if (prev == null) byPosition.set(key, i);
+          else union(prev, i);
+        }
+
+        const boxes = new Map<number, THREE.Box3>();
+        for (let i = 0; i < points.length; i++) {
+          const root = find(i);
+          let box = boxes.get(root);
+          if (!box) {
+            box = new THREE.Box3();
+            boxes.set(root, box);
+          }
+          box.expandByPoint(points[i]);
+        }
+        return [...boxes.values()].filter((box) => !box.isEmpty());
+      };
+
+      const instanceLocal = new THREE.Matrix4();
+      const effectiveWorldMatrix = new THREE.Matrix4();
+      const forEachEffectiveWorldMatrix = (mesh: THREE.Mesh, fn: (world: THREE.Matrix4) => void) => {
+        mesh.updateWorldMatrix(true, false);
+        if ((mesh as THREE.Mesh & THREE.InstancedMesh).isInstancedMesh) {
+          const im = mesh as THREE.InstancedMesh;
+          for (let i = 0; i < im.count; i++) {
+            im.getMatrixAt(i, instanceLocal);
+            effectiveWorldMatrix.multiplyMatrices(mesh.matrixWorld, instanceLocal);
+            fn(effectiveWorldMatrix);
+          }
+          return;
+        }
+        fn(mesh.matrixWorld);
+      };
+
+      const chunkBoxesFromLiveTiles = async (localId: number): Promise<THREE.Box3[]> => {
+        const out: THREE.Box3[] = [];
+        let chunks: { tileId: number; position: Uint32Array; size: Uint32Array }[];
+        try {
+          chunks = await fragModel.getItemDrawChunks([localId]);
+        } catch {
+          return out;
+        }
+        for (const chunk of chunks) {
+          const meshes = tileMeshesById.get(chunk.tileId) ?? [];
+          for (const mesh of meshes) {
+            if (!mesh.geometry) continue;
+            const pos = mesh.geometry.getAttribute("position");
+            if (!pos) continue;
+            const index = mesh.geometry.index;
+            for (let i = 0; i < chunk.position.length; i++) {
+              const start = chunk.position[i];
+              const count = chunk.size[i];
+              if (!Number.isFinite(start) || !Number.isFinite(count) || count === 0) continue;
+              const indexArray = index?.array;
+              if (index && indexArray) {
+                if (start >= indexArray.length) continue;
+                forEachEffectiveWorldMatrix(mesh, (world) => {
+                  out.push(...componentBoxesFromLiveTileRange(pos, indexArray, start, count, world));
+                });
+              } else {
+                if (start >= pos.count) continue;
+                forEachEffectiveWorldMatrix(mesh, (world) => {
+                  out.push(...componentBoxesFromLiveTileRange(pos, null, start, count, world));
+                });
+              }
+            }
+          }
+        }
+        return out;
+      };
+
+      if (productionProbeBox) {
+        const maxComponentDiagonal = THREE.MathUtils.clamp(productionSteelDiag * 0.09, 0.025, 0.35);
+        for (const meshes of tileMeshesById.values()) {
+          for (const mesh of meshes) {
+            if (!mesh.geometry) continue;
+            const pos = mesh.geometry.getAttribute("position");
+            if (!pos) continue;
+            const indexArray = mesh.geometry.index?.array ?? null;
+            const fullCount = indexArray ? indexArray.length : pos.count;
+            forEachEffectiveWorldMatrix(mesh, (world) => {
+              const sceneBoxes = componentBoxesFromLiveTileRange(
+                pos,
+                indexArray,
+                0,
+                fullCount,
+                world,
+              );
+              for (const box of sceneBoxes) {
+                if (!productionProbeBox.intersectsBox(box)) continue;
+                box.getSize(size);
+                box.getCenter(center);
+                const diag = size.length();
+                if (diag < 0.004 || diag > maxComponentDiagonal) continue;
+                const dims = [size.x, size.y, size.z].sort((a, b) => a - b);
+                if (dims[1] < 0.002) continue;
+                let axis = 0;
+                let longLen = size.x;
+                if (size.y > longLen) {
+                  longLen = size.y;
+                  axis = 1;
+                }
+                if (size.z > longLen) {
+                  longLen = size.z;
+                  axis = 2;
+                }
+                axisDir.set(0, 0, 0).setComponent(axis, 1);
+                addMarkerDisc(center, axisDir, Math.max(dims[0] * 0.5, 0.006));
+              }
+            });
+          }
+        }
+      }
+
+      const matrix4FromIfcAxisPlacement = (t: {
+        position: number[];
+        xDirection: number[];
+        yDirection: number[];
+      }): THREE.Matrix4 | null => {
+        if (
+          !t?.position ||
+          t.position.length < 3 ||
+          !t.xDirection ||
+          t.xDirection.length < 3 ||
+          !t.yDirection ||
+          t.yDirection.length < 3
+        ) {
+          return null;
+        }
+        const x = new THREE.Vector3(t.xDirection[0], t.xDirection[1], t.xDirection[2]);
+        const y0 = new THREE.Vector3(t.yDirection[0], t.yDirection[1], t.yDirection[2]);
+        if (x.lengthSq() < 1e-18 || y0.lengthSq() < 1e-18) return null;
+        x.normalize();
+        const z = new THREE.Vector3().crossVectors(x, y0);
+        if (z.lengthSq() < 1e-18) return null;
+        z.normalize();
+        const y = new THREE.Vector3().crossVectors(z, x).normalize();
+        const m = new THREE.Matrix4();
+        m.makeBasis(x, y, z);
+        m.setPosition(t.position[0], t.position[1], t.position[2]);
+        return m;
+      };
+
+      const sampleWorld = new THREE.Matrix4();
+      const samplePos = new THREE.Vector3();
+      const sampleAxis = new THREE.Vector3();
+
+      const steelPickWorld = new THREE.Vector3();
+      const steelPickClosest = new THREE.Vector3();
+
+      for (let i = 0; i < resolved.length; i++) {
+        const work = resolved[i];
+
+        const diameterM =
+          work.row?.boltHoleDiameterMm != null && Number.isFinite(work.row.boltHoleDiameterMm)
+            ? Math.max(work.row.boltHoleDiameterMm, 1) / 1000
+            : null;
+
+        /**
+         * Tekla / IFC bolt patterns are usually **one localId** with many fragment **samples**
+         * (global × local placement per physical bolt). Mesh connectivity / draw chunks alone
+         * collapse those into one bbox — use element snap data for per-instance origins.
+         *
+         * Exporters also emit **several samples along one bolt** (head, shank, nut meshes). Those
+         * are collinear — cluster them and keep **one** ring at the hole mouth (closest to steel).
+         */
+        let markersFromSamples = 0;
+        try {
+          const elements = await fragModel._getElements([work.localId]);
+          const holeRadius =
+            diameterM != null ? Math.max(diameterM / 2, 0.004) : 0.012;
+          const sampleCandidates: ProductionSampleCandidate[] = [];
+          for (const el of elements) {
+            const core = el.core;
+            if (!core?.samples || !core.localTransforms || !core.globalTransforms) continue;
+            for (const sample of Object.values(core.samples)) {
+              const gRaw = core.globalTransforms[sample.item];
+              const lRaw = core.localTransforms[sample.localTransform];
+              if (!gRaw || !lRaw) continue;
+              const gMat = matrix4FromIfcAxisPlacement(gRaw);
+              const lMat = matrix4FromIfcAxisPlacement(lRaw);
+              if (!gMat || !lMat) continue;
+              sampleWorld.copy(gMat).multiply(lMat);
+              samplePos.setFromMatrixPosition(sampleWorld).applyMatrix4(modelWorldInverse);
+              sampleAxis.setFromMatrixColumn(sampleWorld, 2);
+              if (sampleAxis.lengthSq() < 1e-12) continue;
+              sampleAxis.normalize().transformDirection(modelWorldInverse).normalize();
+              if (
+                !Number.isFinite(samplePos.x) ||
+                !Number.isFinite(samplePos.y) ||
+                !Number.isFinite(samplePos.z) ||
+                sampleAxis.lengthSq() < 1e-12
+              ) {
+                continue;
+              }
+              sampleCandidates.push({ pos: samplePos.clone(), axis: sampleAxis.clone() });
+            }
+          }
+          const clusters = clusterFastenerSamplesByCollinearity(
+            sampleCandidates,
+            BOLT_SAMPLE_CLUSTER_PERP_TOL_M,
+          );
+          for (const cl of clusters) {
+            const pick = pickHoleLikeSampleForCluster(
+              cl,
+              steelRefBoxWorld,
+              this.modelObject,
+              steelPickWorld,
+              steelPickClosest,
+            );
+            addMarkerDisc(pick.pos, pick.axis, holeRadius);
+            markersFromSamples++;
+          }
+        } catch {
+          /* geometry fallback below */
+        }
+
+        if (markersFromSamples > 0) {
+          continue;
+        }
+
+        let candidateBoxes: THREE.Box3[] = await chunkBoxesFromLiveTiles(work.localId);
+        try {
+          if (candidateBoxes.length === 0) {
+            const itemGeometry = await fragModel.getItemsGeometry([work.localId], FRAGMENTS_LOD_GEOMETRY);
+            const chunks = itemGeometry[0] ?? [];
+            for (const chunk of chunks) candidateBoxes.push(...componentBoxesFromMeshData(chunk));
+          }
+        } catch {
+          candidateBoxes = [];
+        }
+        if (candidateBoxes.length === 0) {
+          const fallback = await fetchFallbackBoxForLocal(work.localId);
+          if (fallback) candidateBoxes = [fallback];
+        }
+
+        type ProductionBoltComponent = {
+          box: THREE.Box3;
+          center: THREE.Vector3;
+          axis: number;
+          longLen: number;
+          midLen: number;
+          score: number;
+        };
+
+        const strictBoltComponents = (boxes: readonly THREE.Box3[]): ProductionBoltComponent[] => {
+          const out: ProductionBoltComponent[] = [];
+          for (const box of boxes) {
+            if (!(box instanceof THREE.Box3) || box.isEmpty()) continue;
+
+            box.getSize(size);
+            box.getCenter(center);
+
+            const dimensions = [size.x, size.y, size.z].sort((a, b) => a - b);
+            const shortLen = dimensions[0];
+            const midLen = dimensions[1];
+            const maxLen = dimensions[2];
+            if (maxLen < 1e-6 || shortLen < 1e-6 || midLen < 1e-6) continue;
+
+            let longAxis = 0;
+            let longLen = size.x;
+            if (size.y > longLen) {
+              longLen = size.y;
+              longAxis = 1;
+            }
+            if (size.z > longLen) {
+              longLen = size.z;
+              longAxis = 2;
+            }
+
+            const aspect = maxLen / Math.max(midLen, 1e-6);
+            const nearExpectedDiameter =
+              diameterM == null ||
+              (midLen >= diameterM * 0.18 && midLen <= diameterM * 2.6) ||
+              (shortLen >= diameterM * 0.18 && shortLen <= diameterM * 2.6);
+            if (aspect < 1.25 && !nearExpectedDiameter) continue;
+
+            out.push({
+              box: box.clone(),
+              center: center.clone(),
+              axis: longAxis,
+              longLen,
+              midLen,
+              score: aspect + (nearExpectedDiameter ? 2 : 0),
+            });
+          }
+          return out;
+        };
+
+        const relaxedBoltComponents = (boxes: readonly THREE.Box3[]): ProductionBoltComponent[] => {
+          const out: ProductionBoltComponent[] = [];
+          for (const box of boxes) {
+            if (!(box instanceof THREE.Box3) || box.isEmpty()) continue;
+
+            box.getSize(size);
+            box.getCenter(center);
+
+            const dimensions = [size.x, size.y, size.z].sort((a, b) => a - b);
+            const shortLen = dimensions[0];
+            const midLen = dimensions[1];
+            const maxLen = dimensions[2];
+            if (maxLen < 1e-6 || shortLen < 1e-6 || midLen < 1e-6) continue;
+
+            let longAxis = 0;
+            let longLen = size.x;
+            if (size.y > longLen) {
+              longLen = size.y;
+              longAxis = 1;
+            }
+            if (size.z > longLen) {
+              longLen = size.z;
+              longAxis = 2;
+            }
+
+            out.push({
+              box: box.clone(),
+              center: center.clone(),
+              axis: longAxis,
+              longLen,
+              midLen,
+              score: 0,
+            });
+          }
+          return out;
+        };
+
+        const unionBoltComponent = (boxes: readonly THREE.Box3[]): ProductionBoltComponent | null => {
+          if (boxes.length === 0) return null;
+          const u = new THREE.Box3();
+          for (const b of boxes) {
+            if (b instanceof THREE.Box3 && !b.isEmpty()) u.union(b);
+          }
+          if (u.isEmpty()) return null;
+          u.getSize(size);
+          u.getCenter(center);
+          const dims = [size.x, size.y, size.z].sort((a, b) => a - b);
+          let axis = 0;
+          let longLen = size.x;
+          if (size.y > longLen) {
+            longLen = size.y;
+            axis = 1;
+          }
+          if (size.z > longLen) {
+            longLen = size.z;
+            axis = 2;
+          }
+          return {
+            box: u.clone(),
+            center: center.clone(),
+            axis,
+            longLen,
+            midLen: dims[1],
+            score: 0,
+          };
+        };
+
+        let components: ProductionBoltComponent[] = strictBoltComponents(candidateBoxes);
+        if (components.length === 0 && candidateBoxes.length > 0) {
+          components = relaxedBoltComponents(candidateBoxes);
+        }
+        if (components.length === 0) {
+          const fallbackComp = unionBoltComponent(candidateBoxes);
+          if (fallbackComp) components = [fallbackComp];
+        }
+
+        for (const c of components) {
+          const radius =
+            diameterM != null
+              ? Math.max(diameterM / 2, 0.004)
+              : Math.max(c.midLen * 0.45, 0.008);
+          axisDir.set(0, 0, 0).setComponent(c.axis, 1);
+          addMarkerDisc(c.center, axisDir, radius);
+        }
+      }
+
+      this.productionHoleOverlayGroup = group;
+      this.modelObject.add(group);
+    });
+  }
+
+  /**
    * Resolve analyzer highlight refs to ThatOpen fragment **local** ids (assemblies → all parts/bolts).
    */
   async resolveIsolationLocalIds(
@@ -2604,12 +3568,21 @@ export class ViewerEngine {
   /**
    * Workers tagged as fasteners / washers for `getItemsByQuery`, minus IFC opening‑type classes —
    * used with the הבורג (hide fasteners, keep holes) toolbar toggle + view filter visibility.
+   *
+   * @param options.strict — when set, additionally exempts items whose attributes name them as
+   *   structural connection accessories (end plates, fin plates, cleats, angles, gussets,
+   *   brackets, stiffeners). Used by ייצור mode where end / fin / cap plates are part of the
+   *   part the user is fabricating and must stay visible even when Tekla exports them under
+   *   `IfcDiscreteAccessory` alongside actual bolts.
    */
-  async resolveMechanicalFastenerLocalsToHide(): Promise<Set<number>> {
+  async resolveMechanicalFastenerLocalsToHide(
+    options?: { strict?: boolean },
+  ): Promise<Set<number>> {
     if (!this.modelId) return new Set();
     const fragments = this.components.get(OBC.FragmentsManager);
     const fragModel = fragments.list.get(this.modelId);
     if (!fragModel) return new Set();
+    const strict = options?.strict === true;
 
     let queryIds: number[];
     try {
@@ -2640,10 +3613,21 @@ export class ViewerEngine {
           const cat = typeof raw.category === "string" ? raw.category : "";
           const attrs = raw.data as Record<string, { value?: unknown }> | undefined;
           if (ViewerEngine.keepsBoltHoleMachiningVisibleWithFastenersHidden(cat, attrs)) continue;
+          if (strict && ViewerEngine.looksLikeStructuralConnectionAccessory(cat, attrs)) continue;
 
           const blob = ViewerEngine.stringifyItemAttributesForBoltHoleGuess(attrs);
           const isDiscrete = cat.toUpperCase().includes("DISCRETEACCESSORY");
           if (isDiscrete && blob.length < 28) {
+            ambiguousDiscrete.push(lid);
+            continue;
+          }
+          /**
+           * Strict mode: a sparse-attribute `IfcDiscreteAccessory` could be anything — bolt, cap
+           * plate, washer. The shallow heuristic can't tell, and over-hiding plates ruins the
+           * ייצור view. Default to keeping it visible (the deep `getItemsData` pass below still
+           * runs for unambiguous classification when keywords appear there).
+           */
+          if (strict && isDiscrete && blob.length < 64) {
             ambiguousDiscrete.push(lid);
             continue;
           }
@@ -2672,6 +3656,9 @@ export class ViewerEngine {
           if (ViewerEngine.itemDataBlobSuggestsBoltHoleManufacturing(cat, deepBlob)) continue;
           const attrsRecovered = raw?.data as Record<string, { value?: unknown }> | undefined;
           if (ViewerEngine.keepsBoltHoleMachiningVisibleWithFastenersHidden(cat, attrsRecovered)) continue;
+          if (strict && ViewerEngine.looksLikeStructuralConnectionAccessory(cat, attrsRecovered)) continue;
+          /** Strict: the deep blob would name BOLT/NUT/WASHER/HEX/STUD if it really were hardware. */
+          if (strict && !ViewerEngine.deepBlobNamesBoltHardware(deepBlob)) continue;
           out.add(lid);
         }
       } catch {
@@ -2680,6 +3667,18 @@ export class ViewerEngine {
     }
 
     return out;
+  }
+
+  /**
+   * Strict-mode deep-blob check: only hide a sparse `IfcDiscreteAccessory` item when the deep
+   * `getItemsData` blob explicitly names it as bolt / nut / washer / hex / stud / thread / dowel
+   * hardware. Anything ambiguous defaults to visible.
+   */
+  private static deepBlobNamesBoltHardware(deepBlobUpper: string): boolean {
+    return (
+      /\b(BOLT|NUT|WASHER|HEX|STUD|THREAD|DOWEL|SCREW|RIVET|SHEAR\s*STUD)\b/.test(deepBlobUpper) &&
+      !/\b(BOLT\s*-?\s*HOLE|HOLE|BORE|DRILL|CLEARANCE|MACHINED)\b/.test(deepBlobUpper)
+    );
   }
 
   /** Richer IFC property dump from {@link FragmentsModel.getItemsData} — bore holes often surface only here. */
@@ -2789,6 +3788,35 @@ export class ViewerEngine {
     }
 
     return false;
+  }
+
+  /**
+   * Strict-mode exemption: structural connection accessories (end plates, fin plates, shear
+   * tabs, cleats, angles, gussets, brackets, stiffeners) that Tekla / Advance Steel commonly
+   * export under `IfcDiscreteAccessory` alongside actual bolts. The default fastener classifier
+   * sweeps the entire `IfcDiscreteAccessory` category and the global "הסתר ברגים, השאר חורים"
+   * toggle accepts that trade-off — but in ייצור mode the user is fabricating one assembly and
+   * connection plates **must** stay visible, so we filter them out of the hide-set here.
+   *
+   * Pure keyword match on the attribute blob (mark, name, profile, IFC tag) — fast and avoids
+   * any deep `getItemsData` round-trip. Tightly scoped wording (`\bFIN\s*PLATE\b`, etc.) to
+   * avoid catching generic bolt attribute strings that happen to mention "PLATE" in a quantity
+   * description.
+   */
+  private static looksLikeStructuralConnectionAccessory(
+    categoryRaw: string,
+    attrs: Record<string, { value?: unknown }> | undefined,
+  ): boolean {
+    const blob = ViewerEngine.stringifyItemAttributesForBoltHoleGuess(attrs);
+    const combined = `${categoryRaw}\0${blob}`.toUpperCase();
+    return (
+      /\b(END\s*PLATE|END\s*-?PLATE|BASE\s*PLATE|BASE\s*-?PLATE|FIN\s*PLATE|FIN\s*-?PLATE|SHEAR\s*TAB|SHEAR\s*-?TAB|GUSSET\s*PLATE|GUSSET\s*-?PLATE|CONNECTION\s*PLATE|SPLICE\s*PLATE|CAP\s*PLATE)\b/.test(
+        combined,
+      ) ||
+      /\b(CLEAT|ANGLE\s*CLEAT|SEAT\s*ANGLE|WEB\s*ANGLE|FLANGE\s*ANGLE|GUSSET|BRACKET|STIFFENER|WEB\s*STIFFENER)\b/.test(
+        combined,
+      )
+    );
   }
 
   private bboxMapFromLocalSet(selected: Set<number>): Record<string, Set<number>> {
@@ -3597,6 +4625,16 @@ export class ViewerEngine {
         center.z,
         false,
       );
+      /**
+       * Seed the sticky orbit pivot at the focused bbox center. Otherwise the first
+       * `controlstart` after `applyIsolation` / `focusAnalyzerSubset` falls through to
+       * {@link applyOrbitPivotFromModelPickLikeTap} which raycasts at the last pointer NDC —
+       * typically the row/button the user clicked, not the focused subset — and the orbit
+       * radius ends up wherever that raycast happened to hit. Pre-seeding gives the very
+       * first gesture the same "I picked this part" pivot a model click would produce.
+       */
+      this.pickOrbitPivotWorld.copy(center);
+      this.pickOrbitPivotActive = true;
     } catch (error) {
       console.error("Focus failed:", error);
     }
@@ -3771,6 +4809,34 @@ export class ViewerEngine {
       }
     }
 
+    /**
+     * ייצור: strip every fastener local from the isolated subset (and from the edge overlay)
+     * after merges so the user sees holes-in-steel but not the bolt/nut/washer hardware. We do
+     * this **after** merges so `mergeHostedOpeningLocalIds` has already pulled the openings
+     * into `selected` — those stay in the visible set because the classifier explicitly keeps
+     * opening / surface-feature / discrete-accessory bore meshes.
+     *
+     * Skipped for "hidden" mode (which intentionally hides the selected set, so removing items
+     * from it would reveal them — opposite of the user's intent).
+     */
+    if (options?.hideBoltsKeepHoles === true && mode !== "hidden" && selected.size > 0) {
+      /**
+       * Strict mode: keep structural connection accessories (end / fin / cap plates, cleats,
+       * angles, gussets, brackets, stiffeners) visible even when they ship under
+       * `IfcDiscreteAccessory`. The default classifier — used by the global "הסתר ברגים, השאר
+       * חורים" toolbar — sweeps the whole DiscreteAccessory category and accepts that trade-off,
+       * but in ייצור we are looking at a single fabricated assembly where the plates are the
+       * point of the view and must not disappear.
+       */
+      const fastenerLocals = await this.resolveMechanicalFastenerLocalsToHide({ strict: true });
+      if (fastenerLocals.size > 0) {
+        for (const id of fastenerLocals) selected.delete(id);
+        if (coreEdgeOverlayLocals.length > 0) {
+          coreEdgeOverlayLocals = coreEdgeOverlayLocals.filter((id) => !fastenerLocals.has(id));
+        }
+      }
+    }
+
     const map = this.bboxMapFromLocalSet(selected);
 
     if (mode === "isolated") {
@@ -3875,6 +4941,7 @@ export class ViewerEngine {
     return this.enqueueIsolation(async () => {
       try {
         this.inspectionIsolationSketchReadable = false;
+        this.disposeProductionHoleOverlays();
         this.clearContextMainThreadVisuals();
         this.shutdownHiddenRemainderSketchState();
         this.isolationVisualMode = "none";
@@ -4062,6 +5129,106 @@ export class ViewerEngine {
     await this.focusBboxMap(map);
   }
 
+  /**
+   * Iso-diagonal framing on a specific analyzer subset (assemblies / parts / bolts).
+   *
+   * Unlike {@link focusBboxMap}, this uses the same camera math as the initial model fit
+   * ({@link frameCameraIsoDiagonal}): camera distance = `radius * 1.55`, eye on the
+   * `(1, 1, 1)` diagonal, world up = `+Y`, focal offset cleared. Produces the same auto-centered
+   * isometric pose the user sees on first model load, but for a single subset — used by
+   * מצב ייצור so picking an assembly/part snaps the camera straight to a clean, view-filling
+   * pose instead of leaving the part wherever it sat in the parent model.
+   *
+   * Sticky orbit pivot is re-seeded at the subset center so the very first orbit gesture after
+   * this call honors the focused subset (same pattern as `focusBboxMap`).
+   */
+  async frameAnalyzerSubsetIso(
+    entities: Iterable<{ id: string; expressId: number | null }>,
+  ): Promise<boolean> {
+    if (this.disposed || !this.modelId) return false;
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (!fragments.initialized) return false;
+    const map = await this.modelIdMapForAnalyzerEntities(entities);
+    const set = map[this.modelId];
+    if (!set || set.size === 0) return false;
+
+    try {
+      const boxes = await fragments.getBBoxes(map);
+      if (!boxes.length) return false;
+      const aggregate = new THREE.Box3();
+      for (const box of boxes) aggregate.union(box);
+      if (aggregate.isEmpty()) return false;
+
+      const sphere = aggregate.getBoundingSphere(new THREE.Sphere());
+      const radius = Math.max(sphere.radius, 1);
+
+      if (this.modelObject) this.applyPerspectiveClipPlanes(this.modelObject);
+      this.frameCameraIsoDiagonal(sphere.center, radius);
+
+      const ctrl = this.world.camera.controls;
+      if (ctrl) {
+        ctrl.setFocalOffset(0, 0, 0, false);
+        ctrl.setOrbitPoint(sphere.center.x, sphere.center.y, sphere.center.z);
+        void ctrl.stop?.();
+        void ctrl.update?.(0);
+      }
+
+      /** Same seed pattern as {@link focusBboxMap} — keeps the next orbit gesture on this subset. */
+      this.pickOrbitPivotWorld.copy(sphere.center);
+      this.pickOrbitPivotActive = true;
+
+      void fragments.core.update(true);
+      return true;
+    } catch (error) {
+      console.error("frameAnalyzerSubsetIso failed:", error);
+      return false;
+    }
+  }
+
+  async showOnlyAnalyzerSubset(
+    entities: Iterable<{ id: string; expressId: number | null }>,
+  ): Promise<boolean> {
+    if (this.disposed || !this.modelId) return false;
+    const fragments = this.components.get(OBC.FragmentsManager);
+    const fragModel = fragments.list.get(this.modelId);
+    if (!fragModel) return false;
+
+    const map = await this.modelIdMapForAnalyzerEntities(entities);
+    const selected = new Set(map[this.modelId] ?? []);
+    if (selected.size === 0) return false;
+
+    this.clearStoredPickOrbitPivot();
+    this.inspectionIsolationSketchReadable = false;
+    this.shutdownHiddenRemainderSketchState();
+    this.clearContextMainThreadVisuals();
+    this.clearPickedSelectionEdgeOverlay();
+    this.clearSelectionOutlineTint();
+    this.isolationVisualMode = "none";
+    if (this.modelObject) {
+      setSketchEdgeVisibility(this.modelObject, false);
+    }
+
+    await fragments.resetHighlight();
+    await fragModel.resetVisible();
+    await this.syncFragmentsViewForced(fragments);
+
+    const allIds = await this.allFragmentLocalIds(fragModel);
+    const allIdSet = new Set(allIds);
+    const visible = new Set<number>();
+    for (const id of selected) {
+      if (allIdSet.has(id)) visible.add(id);
+    }
+    if (visible.size === 0) return false;
+
+    const toHide = allIds.filter((id) => !visible.has(id));
+    await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
+    await this.syncFragmentsViewForced(fragments);
+    await this.focusBboxMap(this.bboxMapFromLocalSet(visible));
+    await this.syncFragmentsViewForced(fragments);
+    await this.deferSyncFragmentsView(fragments);
+    return true;
+  }
+
   async focusItemIds(itemIds: number[]) {
     await this.focusAnalyzerSubset(itemIds.map((expressId) => ({ id: "", expressId })));
   }
@@ -4143,6 +5310,7 @@ export class ViewerEngine {
     this.cameraSensitivityRefDistance = 25;
     this.clearStoredPickOrbitPivot();
     this.clearInspectionVisualizationSession();
+    this.disposeProductionHoleOverlays();
     this.shutdownHiddenRemainderSketchState();
     this.clearContextMainThreadVisuals();
     void this.clearIsolationVisuals();

@@ -1,3 +1,5 @@
+import type { AnalyzerAssembly, AnalyzerBoltRow } from "@/types/domain";
+
 /**
  * IFC GlobalId strings vary (UUID vs compressed STEP form). Normalize for comparisons
  * between ThatOpen fragments and the Python analyzer (`id` = entity GlobalId).
@@ -72,6 +74,57 @@ export function normalizedBoltSteelGuidsForPart(
     if (bk) out.add(bk);
   }
   return out;
+}
+
+/**
+ * Bolts whose hole overlays should appear in מצב ייצור for the given visible steel subset.
+ *
+ * Unions (non‑exclusive): `boltSteelLinks` hits, bolts listed on {@link AnalyzerAssembly} rows that
+ * share any visible part, and bolts whose GlobalId appears in `productionAnalyzerRefs`.
+ */
+export function analyzerBoltsForProductionHoleOverlay(
+  visibleSteelPartIds: readonly string[],
+  assemblies: readonly AnalyzerAssembly[],
+  boltSteelLinks: readonly { boltGlobalId: string; partGlobalId: string }[] | undefined,
+  allBoltRows: readonly AnalyzerBoltRow[],
+  productionAnalyzerRefs?: readonly { id: string }[],
+): AnalyzerBoltRow[] {
+  const byKey = new Map<string, AnalyzerBoltRow>();
+  const take = (keys: Set<string>) => {
+    for (const b of allBoltRows) {
+      const bk = normalizeIfcGuidKey(b.id) ?? b.id.trim();
+      if (bk && keys.has(bk)) byKey.set(bk, b);
+    }
+  };
+
+  const linkKeys = new Set<string>();
+  for (const row of boltSteelLinks ?? []) {
+    if (!visibleSteelPartIds.some((v) => partGuidsMatch(row.partGlobalId, v))) continue;
+    const bk = normalizeIfcGuidKey(row.boltGlobalId) ?? row.boltGlobalId.trim();
+    if (bk) linkKeys.add(bk);
+  }
+  take(linkKeys);
+
+  const asmKeys = new Set<string>();
+  for (const asm of assemblies) {
+    if (!asm.parts.some((p) => visibleSteelPartIds.some((v) => partGuidsMatch(p.id, v)))) continue;
+    for (const b of asm.bolts ?? []) {
+      const bk = normalizeIfcGuidKey(b.id) ?? b.id.trim();
+      if (bk) asmKeys.add(bk);
+    }
+  }
+  take(asmKeys);
+
+  if (productionAnalyzerRefs?.length) {
+    const refKeys = new Set(
+      productionAnalyzerRefs
+        .map((r) => normalizeIfcGuidKey(r.id))
+        .filter((k): k is string => !!k),
+    );
+    take(refKeys);
+  }
+
+  return [...byKey.values()];
 }
 
 /** All steel part IFC GlobalIds sitting in assemblies that contain `partId`. */
@@ -222,32 +275,6 @@ export function normalizedBoltGuidsFromContainingAssemblies(
       const bk = normalizeIfcGuidKey(b.id) ?? b.id.trim();
       if (bk) out.add(bk);
     }
-  }
-  return out;
-}
-
-/**
- * Bolts from `boltSteelLinks` whose `partGlobalId` is **any** steel listed on an analyzer assembly,
- * or the isolated part id. Catches “Part B” when B is missing from `assemblies[].parts` but the
- * link table still ties the joint to steel A that *is* on an assembly row.
- */
-function normalizedBoltSteelGuidsForLinksTouchingAssemblyCatalog(
-  isolatedPartId: string,
-  assemblies: readonly { parts: { id: string }[] }[],
-  boltSteelLinks: readonly { boltGlobalId: string; partGlobalId: string }[] | undefined,
-): Set<string> {
-  const catalog = new Set<string>();
-  catalog.add(normalizedPartSteelKey(isolatedPartId));
-  for (const asm of assemblies) {
-    for (const p of asm.parts) {
-      catalog.add(normalizedPartSteelKey(p.id));
-    }
-  }
-  const out = new Set<string>();
-  for (const row of boltSteelLinks ?? []) {
-    if (!catalog.has(normalizedPartSteelKey(row.partGlobalId))) continue;
-    const bk = normalizeIfcGuidKey(row.boltGlobalId) ?? row.boltGlobalId.trim();
-    if (bk) out.add(bk);
   }
   return out;
 }

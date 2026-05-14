@@ -7,7 +7,6 @@ import { formatCount, formatKgPlain, formatMmPlain, formatQuantityInt } from "@/
 import { displayPartMark } from "@/components/viewer/SelectionPickDetails";
 import type { AggregatedAssemblyRow } from "@/lib/viewer/modelAggregates";
 import {
-  ArrowRight,
   Minimize,
   MoveLeft,
   Search,
@@ -42,14 +41,11 @@ type ProductionModeOverlayProps = {
   assemblyRows: AggregatedAssemblyRow[];
   partRows: ProductionPartRow[];
   selectedAssembly: AnalyzerAssembly | null;
-  selectionTitle: string;
-  selectionKind: "assembly" | "part" | null;
   partsDrawerOpen: boolean;
   onTabChange: (tab: ProductionTab) => void;
   onSearchChange: (value: string) => void;
   onPickAssembly: (row: AggregatedAssemblyRow) => void;
   onPickPart: (row: ProductionPartRow) => void;
-  onBackToLists: () => void;
   onPartsDrawerClose: () => void;
   onPickAssemblyPart: (part: AnalyzerPart) => void;
 };
@@ -81,14 +77,11 @@ export function ProductionModeOverlay({
   assemblyRows,
   partRows,
   selectedAssembly,
-  selectionTitle,
-  selectionKind,
   partsDrawerOpen,
   onTabChange,
   onSearchChange,
   onPickAssembly,
   onPickPart,
-  onBackToLists,
   onPartsDrawerClose,
   onPickAssemblyPart,
 }: ProductionModeOverlayProps) {
@@ -235,38 +228,6 @@ export function ProductionModeOverlay({
 
   return (
     <>
-      <div
-        className="pointer-events-auto absolute inset-x-0 top-[calc(2.5rem+env(safe-area-inset-top))] z-40 border-b border-white/70 bg-white/90 px-3 py-3 shadow-sm backdrop-blur-xl"
-        dir="rtl"
-      >
-        <div className="mx-auto flex max-w-6xl items-center gap-3">
-          <Button
-            type="button"
-            variant="ghost"
-            className="h-12 rounded-2xl px-4 text-sm font-bold text-zinc-700 hover:bg-zinc-100 hover:text-zinc-950"
-            onClick={onBackToLists}
-          >
-            <ArrowRight className="ml-2 size-5" aria-hidden />
-            חזור לרשימות
-          </Button>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-lg font-black text-zinc-950" dir="ltr">
-              {selectionTitle}
-            </p>
-            <p className="text-xs font-semibold text-zinc-500">
-              {selectionKind === "assembly" ? "Assembly focused workspace" : "Part focused workspace"}
-            </p>
-          </div>
-          <span className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#003CFF]">
-            {selectionKind === "assembly" ? (
-              <SquaresUnite className="size-6" aria-hidden />
-            ) : (
-              <SquaresIntersect className="size-6" aria-hidden />
-            )}
-          </span>
-        </div>
-      </div>
-
       {partsDrawerOpen && selectedAssembly ? (
         <div
           className="pointer-events-auto absolute inset-x-0 bottom-0 z-50 rounded-t-[2rem] border-t border-zinc-200 bg-white px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 shadow-[0_-22px_55px_rgba(15,23,42,0.22)]"

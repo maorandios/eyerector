@@ -30,7 +30,11 @@ import {
   type MultiSelectWeightItem,
   useMultiSelectStore,
 } from "@/lib/state/multi-select-store";
-import { ViewerEngine, type ApplyIsolationOptions } from "@/lib/viewer/engine";
+import {
+  ViewerEngine,
+  type ApplyIsolationOptions,
+  type ProductionHoleOverlayInput,
+} from "@/lib/viewer/engine";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import type { AnalyzerAssembly, AnalyzerBoltRow, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
@@ -65,6 +69,7 @@ import { useViewFilterStore } from "@/lib/state/view-filter-store";
 import { resolveViewFilterHiddenLocals } from "@/lib/viewer/view-filter-resolve";
 import { formatCount, formatElevationMm, formatKgPlain, formatMmPlain, formatQuantityInt } from "@/lib/format-numbers";
 import {
+  analyzerBoltsForProductionHoleOverlay,
   analyzerEntityMatchesPick,
   analyzerRefsFromAssembly,
   resolvePartIsolationBoltPolicy,
@@ -169,7 +174,7 @@ export default function ViewerPage() {
   const [productionTab, setProductionTab] = useState<ProductionTab>("assemblies");
   const [productionSearch, setProductionSearch] = useState("");
   const [productionViewerOpen, setProductionViewerOpen] = useState(false);
-  const [productionSelection, setProductionSelection] = useState<ProductionSelection>({
+  const [, setProductionSelection] = useState<ProductionSelection>({
     type: null,
     id: null,
   });
@@ -613,20 +618,6 @@ export default function ViewerPage() {
     () => analyzerData?.parts.find((p) => p.id === selectedPartId) || null,
     [analyzerData, selectedPartId],
   );
-  const productionSelectionTitle = useMemo(() => {
-    if (productionSelection.type === "assembly" && selectedAssembly) {
-      return (
-        selectedAssembly.assemblyMark ||
-        selectedAssembly.name ||
-        selectedAssembly.tag ||
-        selectedAssembly.id
-      );
-    }
-    if (productionSelection.type === "part" && selectedPart && !isAnalyzerBoltRow(selectedPart)) {
-      return displayPartMark(selectedPart);
-    }
-    return "מצב ייצור";
-  }, [productionSelection.type, selectedAssembly, selectedPart]);
 
   /** Part / profile isolation: refs + GUID sets (links with assembly fallback; spatial pass links-only when present). */
   const partIsolationBoltPolicy = useMemo(() => {
@@ -1154,14 +1145,74 @@ export default function ViewerPage() {
     setSelectionStatus("נוקה");
   }, [engine, clearEngineSelectionPreservingViewFilter]);
 
-  const isolateProductionRefs = useCallback(
-    async (refs: readonly { id: string; expressId: number | null }[]) => {
-      if (!engine || refs.length === 0) return;
+  const showOnlyProductionRefs = useCallback(
+    async (
+      refs: readonly { id: string; expressId: number | null }[],
+      holeOverlay?: Pick<ProductionHoleOverlayInput, "visibleSteelPartIds">,
+    ) => {
+      if (!engine || refs.length === 0) return false;
+      /**
+       * Reuse the exact ניהול isolation pipeline so materials, lighting, edge overlay and camera
+       * sensitivity match the rest of the app pixel-for-pixel. We intentionally do **not** call
+       * `useIsolationStore.setIsolation(...)` — that store only drives the floating "בודד /
+       * הסתר / הצג בהקשר / הצג הכל" HUD, which we don't want in ייצור mode. The engine's own
+       * `isolationVisualMode` still tracks the visual state internally, and the standard
+       * `clearIsolationVisuals` path restores the full model when leaving ייצור.
+       *
+       * Pass `focus: false` so we skip `focusBboxMap` (which places the camera at
+       * `bbox.diagonal × √3` from center → far too far for a single part) and instead call
+       * `frameAnalyzerSubsetIso` to get the same auto-centered iso pose the model uses on first
+       * load. This makes every ייצור pick snap to a clean, view-filling iso view.
+       */
+      useIsolationStore.getState().clearIsolation();
       const ids = await engine.resolveIsolationLocalIds(refs);
-      if (ids.size === 0) return;
-      await applyIsolationModeToLocalIds("isolated", ids, { focus: false });
+      if (ids.size === 0) {
+        engine.clearProductionHoleOverlays();
+        return false;
+      }
+
+      const steelIds = holeOverlay?.visibleSteelPartIds;
+      if (steelIds && steelIds.length > 0 && analyzerData) {
+        const allBolts = (analyzerData.parts ?? []).filter(isAnalyzerBoltRow);
+        const boltsForOverlay = analyzerBoltsForProductionHoleOverlay(
+          steelIds,
+          analyzerData.assemblies ?? [],
+          analyzerData.boltSteelLinks,
+          allBolts,
+          refs,
+        );
+        /**
+         * Capture fastener bboxes **before** `hideBoltsKeepHoles` hides them — some fragment paths
+         * omit bbox data for invisible tiles.
+         */
+        await engine.showProductionHoleOverlays({
+          boltSteelLinks: analyzerData.boltSteelLinks ?? [],
+          bolts: allBolts,
+          visibleSteelPartIds: steelIds,
+          overlayBoltRows: boltsForOverlay,
+          candidateLocalIds: [...ids],
+        });
+      } else {
+        engine.clearProductionHoleOverlays();
+      }
+
+      /**
+       * Temporary debug step for ייצור holes: keep fastener solids visible and draw reference
+       * rings around them first. Once marker count/location is correct, we can hide the bolts.
+       */
+      const ok = await engine.applyIsolation("isolated", ids, {
+        focus: false,
+        hideBoltsKeepHoles: false,
+      });
+      if (!ok) {
+        engine.clearProductionHoleOverlays();
+        return false;
+      }
+      await engine.frameAnalyzerSubsetIso(refs);
+
+      return true;
     },
-    [engine, applyIsolationModeToLocalIds],
+    [analyzerData, engine],
   );
 
   const handleAppModeChange = useCallback(
@@ -1173,6 +1224,8 @@ export default function ViewerPage() {
       setFlashTooltip(null);
       setSnapshotSessionOpen(false);
       setMarkupDrawingEnabled(false);
+      useAppStore.setState({ sketchModeEnabled: false });
+      engine?.setSketchModeFromUI(false);
       setViewerTool("none");
       setActiveSheet("none");
       setProductionPartsDrawerOpen(false);
@@ -1185,6 +1238,12 @@ export default function ViewerPage() {
 
       setProductionViewerOpen(false);
       setProductionSelection({ type: null, id: null });
+      /**
+       * `restoreFullModelIsolationState` calls `engine.clearIsolationVisuals()`, which fully
+       * resets fragment visibility, highlights and the engine's internal `isolationVisualMode`.
+       * That undoes the silent isolation we applied for ייצור so ניהול resumes with the full
+       * model visible.
+       */
       void restoreFullModelIsolationState();
       void clearViewerSelection();
     },
@@ -1195,6 +1254,7 @@ export default function ViewerPage() {
       setActiveSheet,
       setMode,
       setViewerTool,
+      engine,
     ],
   );
 
@@ -1202,17 +1262,30 @@ export default function ViewerPage() {
     async (row: AggregatedAssemblyRow) => {
       const primary = row.instances[0];
       if (!primary) return;
-      const refs = row.instances.flatMap((assembly) => analyzerRefsFromAssembly(assembly));
+      const refs = analyzerRefsFromAssembly(primary);
       setProductionSelection({ type: "assembly", id: primary.id });
       setProductionViewerOpen(true);
       setProductionPartsDrawerOpen(false);
       setGlobalSearchOpen(false);
       setActiveSheet("none");
-      await selectAggregatedAssemblyRow(row);
+      engine?.exitViewMode();
+      useAppStore.setState({ sketchModeEnabled: false });
+      engine?.setSketchModeFromUI(false);
+      clearViewModeStore();
+      useClippingStore.getState().setClipSectionOrthoActive(false);
+      useMultiSelectStore.getState().exitMultiSelectSession();
+      setElementContextPanel(null);
+      setProfileGroupDetail(null);
+      setAssemblyDetailOverride(null);
+      setAssemblyStructureNotice(false);
+      setSelectedAssemblyId(primary.id);
+      setSelectedPartId(null);
       setActiveSheet("none");
-      await isolateProductionRefs(refs);
+      setSelectionStatus(`ייצור אסמבלי: ${row.displayMark}`);
+      const visibleSteelPartIds = primary.parts.map((p) => p.id);
+      await showOnlyProductionRefs(refs, { visibleSteelPartIds });
     },
-    [isolateProductionRefs, selectAggregatedAssemblyRow, setActiveSheet],
+    [clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
   );
 
   const openProductionPart = useCallback(
@@ -1225,22 +1298,25 @@ export default function ViewerPage() {
       setProductionPartsDrawerOpen(false);
       setGlobalSearchOpen(false);
       setActiveSheet("none");
-      await selectPartInstances(row.instances);
+      engine?.exitViewMode();
+      useAppStore.setState({ sketchModeEnabled: false });
+      engine?.setSketchModeFromUI(false);
+      clearViewModeStore();
+      useClippingStore.getState().setClipSectionOrthoActive(false);
+      useMultiSelectStore.getState().exitMultiSelectSession();
+      setElementContextPanel(null);
+      setProfileGroupDetail(null);
+      setAssemblyDetailOverride(null);
+      setAssemblyStructureNotice(false);
+      setSelectedPartId(first.id);
+      setSelectedAssemblyId(null);
       setActiveSheet("none");
-      await isolateProductionRefs(refs);
+      setSelectionStatus(`ייצור חלק: ${row.displayMark}`);
+      const visibleSteelPartIds = row.instances.map((p) => p.id);
+      await showOnlyProductionRefs(refs, { visibleSteelPartIds });
     },
-    [isolateProductionRefs, selectPartInstances, setActiveSheet],
+    [clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
   );
-
-  const handleProductionBackToLists = useCallback(async () => {
-    setProductionViewerOpen(false);
-    setProductionSelection({ type: null, id: null });
-    setProductionPartsDrawerOpen(false);
-    setViewerTool("none");
-    setActiveSheet("none");
-    await restoreFullModelIsolationState();
-    await clearViewerSelection();
-  }, [clearViewerSelection, restoreFullModelIsolationState, setActiveSheet, setViewerTool]);
 
   const handleProductionPickAssemblyPart = useCallback(
     async (part: AnalyzerPart) => {
@@ -2038,14 +2114,11 @@ export default function ViewerPage() {
         assemblyRows={productionAssemblyRows}
         partRows={productionPartRows}
         selectedAssembly={selectedAssembly}
-        selectionTitle={productionSelectionTitle}
-        selectionKind={productionSelection.type}
         partsDrawerOpen={productionPartsDrawerOpen}
         onTabChange={setProductionTab}
         onSearchChange={setProductionSearch}
         onPickAssembly={(row) => void openProductionAssembly(row)}
         onPickPart={(row) => void openProductionPart(row)}
-        onBackToLists={() => void handleProductionBackToLists()}
         onPartsDrawerClose={() => setProductionPartsDrawerOpen(false)}
         onPickAssemblyPart={(part) => void handleProductionPickAssemblyPart(part)}
       />
@@ -2143,7 +2216,7 @@ export default function ViewerPage() {
       <ViewerBottomDock
         appMode={appMode}
         onAppModeChange={handleAppModeChange}
-        modeSwitcherOnly={appMode === "production" && !productionViewerOpen}
+        modeSwitcherOnly={appMode === "production"}
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
         onDashboard={toggleDashboardSheet}
