@@ -1190,19 +1190,26 @@ export default function ViewerPage() {
           bolts: allBolts,
           visibleSteelPartIds: steelIds,
           overlayBoltRows: boltsForOverlay,
-          candidateLocalIds: [...ids],
         });
       } else {
         engine.clearProductionHoleOverlays();
       }
 
+      const snapshotGuids = engine.getProductionBoltGuidAllowlistSnapshot();
       /**
-       * Temporary debug step for ייצור holes: keep fastener solids visible and draw reference
-       * rings around them first. Once marker count/location is correct, we can hide the bolts.
+       * Restrict isolation fasteners to the same GUID set the overlay discovered (analyzer +
+       * IFC `ConnectedTo` near visible steel) — avoids floating neighbour bolts and keeps allowlist
+       * in sync with red hole discs.
        */
       const ok = await engine.applyIsolation("isolated", ids, {
         focus: false,
         hideBoltsKeepHoles: false,
+        ...(snapshotGuids != null && snapshotGuids.size > 0
+          ? {
+              boltGuidIsolationAllowlist: snapshotGuids,
+              spatialBoltIsolationAllowlist: snapshotGuids,
+            }
+          : {}),
       });
       if (!ok) {
         engine.clearProductionHoleOverlays();

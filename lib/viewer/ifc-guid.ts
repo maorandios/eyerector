@@ -79,8 +79,10 @@ export function normalizedBoltSteelGuidsForPart(
 /**
  * Bolts whose hole overlays should appear in מצב ייצור for the given visible steel subset.
  *
- * Unions (non‑exclusive): `boltSteelLinks` hits, bolts listed on {@link AnalyzerAssembly} rows that
- * share any visible part, and bolts whose GlobalId appears in `productionAnalyzerRefs`.
+ * Unions (non‑exclusive): `boltSteelLinks` hits **including bolt-hyperedge expansion** (so a joint
+ * bolt listed only on the “main” part still appears when isolating the **secondary** connected
+ * member), bolts listed on {@link AnalyzerAssembly} rows that share any visible part, and bolts
+ * whose GlobalId appears in `productionAnalyzerRefs`.
  */
 export function analyzerBoltsForProductionHoleOverlay(
   visibleSteelPartIds: readonly string[],
@@ -97,11 +99,12 @@ export function analyzerBoltsForProductionHoleOverlay(
     }
   };
 
+  /** Same joint as {@link normalizedBoltSteelGuidsForBoltLinkReach} — not only rows where `partGlobalId` ∈ visible. */
   const linkKeys = new Set<string>();
-  for (const row of boltSteelLinks ?? []) {
-    if (!visibleSteelPartIds.some((v) => partGuidsMatch(row.partGlobalId, v))) continue;
-    const bk = normalizeIfcGuidKey(row.boltGlobalId) ?? row.boltGlobalId.trim();
-    if (bk) linkKeys.add(bk);
+  for (const v of visibleSteelPartIds) {
+    for (const bk of normalizedBoltSteelGuidsForBoltLinkReach(v, assemblies, boltSteelLinks)) {
+      linkKeys.add(bk);
+    }
   }
   take(linkKeys);
 

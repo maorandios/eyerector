@@ -141,7 +141,7 @@ export type ProductionHoleOverlayInput = {
    * `boltSteelLinks` uses GUIDs that do not match assembly `parts` / Tekla omits relations.
    */
   overlayBoltRows?: readonly Pick<AnalyzerBoltRow, "id" | "expressId" | "boltHoleDiameterMm">[];
-  /** Already resolved production subset locals; used as a direct fastener-source fallback. */
+  /** @deprecated No longer used — hole locals come only from analyzer bolt GUIDs (links + overlay rows). */
   candidateLocalIds?: readonly number[];
 };
 
@@ -379,6 +379,11 @@ export class ViewerEngine {
   private viewerLightIntensityBackup: number[] | null = null;
   /** ייצור: dark cylinder meshes indicating hole axes/diameters when fastener solids are hidden. */
   private productionHoleOverlayGroup: THREE.Group | null = null;
+  /**
+   * Last ייצור overlay bolt GUID set (normalized keys), including IFC `ConnectedTo` supplements.
+   * Drives `applyIsolation` allowlists so the same fasteners get hole discs **and** visibility.
+   */
+  private productionBoltGuidAllowlistSnapshot: ReadonlySet<string> | null = null;
   private readonly tmpVecEye = new THREE.Vector3();
   private readonly tmpClipNormal = new THREE.Vector3();
   /** Cursor-based orbit pivot for pan/dolly/wheel (see {@link installPerspectiveOrbitPivotFromCursor}). */
@@ -2736,6 +2741,14 @@ export class ViewerEngine {
   }
 
   /**
+   * GUID keys (normalized) for bolts last passed to ייצור isolation — use with {@link applyIsolation}
+   * {@link ApplyIsolationOptions.boltGuidIsolationAllowlist} / `spatialBoltIsolationAllowlist`.
+   */
+  getProductionBoltGuidAllowlistSnapshot(): ReadonlySet<string> | null {
+    return this.productionBoltGuidAllowlistSnapshot;
+  }
+
+  /**
    * Removes synthetic ייצור hole cylinders (own geometry — must dispose).
    * Safe to call multiple times.
    */
@@ -2746,6 +2759,7 @@ export class ViewerEngine {
   private disposeProductionHoleOverlays(): void {
     const g = this.productionHoleOverlayGroup;
     this.productionHoleOverlayGroup = null;
+    this.productionBoltGuidAllowlistSnapshot = null;
     if (!g) return;
     g.removeFromParent();
     const materials = new Set<THREE.Material>();
@@ -2810,6 +2824,113 @@ export class ViewerEngine {
         if (k) boltByKey.set(k, b);
       }
 
+      /**
+       * Steel hull + IFC `ConnectedTo` expansion: discover joint fasteners tied to the visible
+       * steel locals even when analyzer `boltSteelLinks` only names the “primary” member — needed
+       * for red hole discs on secondary beams in the same connection.
+       */
+      let steelRefBoxWorld: THREE.Box3 | null = null;
+      try {
+        const steelMap = await this.modelIdMapForAnalyzerEntities(
+          input.visibleSteelPartIds.map((id) => ({ id, expressId: null })),
+        );
+        const steelBoxes = await fragments.getBBoxes(steelMap);
+        const steelBox = new THREE.Box3();
+        for (const box of steelBoxes) steelBox.union(box);
+        if (!steelBox.isEmpty()) {
+          steelRefBoxWorld = steelBox.clone();
+        }
+        const steelLocalsSet = new Set<number>([...(steelMap[this.modelId] ?? [])]);
+        if (steelLocalsSet.size > 0 && steelRefBoxWorld && !steelRefBoxWorld.isEmpty()) {
+          const allIdSet = new Set(await this.allFragmentLocalIds(fragModel));
+          const expanded = new Set<number>(steelLocalsSet);
+          await this.mergeBoltHoleConnectionLocals(fragModel, expanded, allIdSet, undefined);
+          await this.mergeBoltHoleConnectionLocals(fragModel, expanded, allIdSet, undefined);
+          await this.mergeBoltHoleConnectionLocals(fragModel, expanded, allIdSet, undefined);
+          /**
+           * Match {@link applyIsolationImpl}: Tekla / IFC often omit `ConnectedTo` hops from the
+           * “secondary” leaf back to shared fasteners — spatial padding still pulls those locals in
+           * during isolation. Without the same merge here, {@link showProductionHoleOverlays} never
+           * sees bolt fragment ids and draws **no** red discs while blue bolt solids still appear.
+           */
+          await this.mergeFastenersNearIsolationSeeds(
+            fragModel,
+            expanded,
+            [...steelLocalsSet],
+            allIdSet,
+            undefined,
+          );
+
+          const steelDiag = steelBox.getSize(new THREE.Vector3()).length();
+          const pad = THREE.MathUtils.clamp(steelDiag * 0.04, 0.028, 0.12);
+          const steelPadded = steelRefBoxWorld.clone().expandByScalar(pad);
+          const supplemental = [...expanded].filter((id) => !steelLocalsSet.has(id));
+          const BCHUNK = 220;
+          for (let off = 0; off < supplemental.length; off += BCHUNK) {
+            const slice = supplemental.slice(off, off + BCHUNK);
+            let boxes: THREE.Box3[];
+            try {
+              boxes = await fragments.getBBoxes({ [this.modelId]: new Set(slice) });
+            } catch {
+              continue;
+            }
+            const nearSteel: number[] = [];
+            for (let j = 0; j < slice.length; j++) {
+              const bb = boxes[j];
+              if (bb instanceof THREE.Box3 && !bb.isEmpty() && steelPadded.intersectsBox(bb)) {
+                nearSteel.push(slice[j]);
+              }
+            }
+            if (nearSteel.length === 0) continue;
+            try {
+              const rows = await fragModel.getItems(nearSteel);
+              for (const lid of nearSteel) {
+                const raw = rows.get(lid);
+                if (!this.isBoltHoleConnectionCompanionCategory(raw?.category)) continue;
+                const c = (raw?.category ?? "").toUpperCase();
+                if (
+                  c.includes("OPENINGELEMENT") ||
+                  c.includes("OPENINGSTANDARD") ||
+                  c.includes("FEATUREELEMENTSUBTRACTION") ||
+                  c.includes("VOIDINGFEATURE")
+                ) {
+                  continue;
+                }
+                const guid = typeof raw?.guid === "string" ? raw.guid.trim() : "";
+                if (!guid) continue;
+                const bk = normalizeIfcGuidKey(guid) ?? guid;
+                if (!bk) continue;
+                /**
+                 * Prefer analyzer-driven keys; also register **mechanical** fasteners the JSON never
+                 * links to the secondary leaf so we still resolve `localId` (narrower than the old
+                 * “any companion” path that created phantom discs).
+                 */
+                if (!boltKeyToRawGuid.has(bk) && !this.isIfcMechanicalStyleFastenerCategory(raw?.category)) {
+                  continue;
+                }
+                boltKeyToRawGuid.set(bk, guid);
+                this.analyzerGuidKeyToFragmentLocal.set(bk, lid);
+              }
+            } catch {
+              /* ignore chunk */
+            }
+          }
+        }
+      } catch {
+        /* steel proximity / IFC expansion optional */
+      }
+
+      /**
+       * Drop discs clearly outside the fabricated member, but allow grip/head clearance past the
+       * tight steel AABB (secondary-side picks were rejected by the old fixed distance cap).
+       */
+      let steelDiscClipBoxWorld: THREE.Box3 | null = null;
+      if (steelRefBoxWorld && !steelRefBoxWorld.isEmpty()) {
+        const diag = steelRefBoxWorld.getSize(new THREE.Vector3()).length();
+        const clipPad = THREE.MathUtils.clamp(diag * 0.042, 0.1, 0.28);
+        steelDiscClipBoxWorld = steelRefBoxWorld.clone().expandByScalar(clipPad);
+      }
+
       type BoltWork = {
         boltKey: string;
         rawGuid: string;
@@ -2825,91 +2946,6 @@ export class ViewerEngine {
           row: boltByKey.get(boltKey),
           localId: this.analyzerGuidKeyToFragmentLocal.get(boltKey) ?? null,
         });
-      }
-
-      const seenLocalIds = new Set<number>();
-      const pushCandidateLocal = (localId: number) => {
-        if (!Number.isFinite(localId) || seenLocalIds.has(localId)) return;
-        seenLocalIds.add(localId);
-        works.push({
-          boltKey: `local:${localId}`,
-          rawGuid: `local:${localId}`,
-          row: undefined,
-          localId,
-        });
-      };
-
-      if (input.candidateLocalIds?.length) {
-        const candidateIds = [...new Set(input.candidateLocalIds)].filter((id) => Number.isFinite(id));
-        const CHUNK = 260;
-        for (let i = 0; i < candidateIds.length; i += CHUNK) {
-          const slice = candidateIds.slice(i, i + CHUNK);
-          try {
-            const rows = await fragModel.getItems(slice);
-            for (const lid of slice) {
-              const raw = rows.get(lid);
-              const cat = typeof raw?.category === "string" ? raw.category.toUpperCase() : "";
-              if (
-                cat.includes("MECHANICALFASTENER") ||
-                cat.includes("IFCFASTENER") ||
-                (cat.includes("FASTENER") && !cat.includes("GRID")) ||
-                cat.includes("DISCRETEACCESSORY")
-              ) {
-                pushCandidateLocal(lid);
-              }
-            }
-          } catch {
-            /* ignore candidate chunk */
-          }
-        }
-      }
-
-      /**
-       * Debug/reference fallback: do not trust analyzer links. Query every fastener-like item from
-       * fragments, then keep only bboxes that sit close to the selected production steel bbox.
-       */
-      let productionProbeBox: THREE.Box3 | null = null;
-      /** Union of isolated steel AABBs in scene/world space — hole markers hug this surface. */
-      let steelRefBoxWorld: THREE.Box3 | null = null;
-      let productionSteelDiag = 1;
-      try {
-        const steelMap = await this.modelIdMapForAnalyzerEntities(
-          input.visibleSteelPartIds.map((id) => ({ id, expressId: null })),
-        );
-        const steelBoxes = await fragments.getBBoxes(steelMap);
-        const steelBox = new THREE.Box3();
-        for (const box of steelBoxes) steelBox.union(box);
-        if (!steelBox.isEmpty()) {
-          steelRefBoxWorld = steelBox.clone();
-          const steelDiag = steelBox.getSize(new THREE.Vector3()).length();
-          productionSteelDiag = Math.max(steelDiag, 1);
-          const probeBox = steelBox.clone().expandByScalar(THREE.MathUtils.clamp(steelDiag * 0.08, 0.05, 0.45));
-          productionProbeBox = probeBox;
-          const rawFastenerIds = await fragModel.getItemsByQuery({
-            categories: FASTENER_ITEMS_BY_QUERY_REGEX,
-          });
-          const fastenerIds = Array.isArray(rawFastenerIds)
-            ? rawFastenerIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id))
-            : [];
-          const CHUNK = 160;
-          for (let i = 0; i < fastenerIds.length; i += CHUNK) {
-            const slice = fastenerIds.slice(i, i + CHUNK);
-            let boxes: THREE.Box3[];
-            try {
-              boxes = await fragments.getBBoxes({ [this.modelId]: new Set(slice) });
-            } catch {
-              continue;
-            }
-            for (let j = 0; j < slice.length; j++) {
-              const box = boxes[j];
-              if (!(box instanceof THREE.Box3) || box.isEmpty()) continue;
-              if (!probeBox.intersectsBox(box)) continue;
-              pushCandidateLocal(slice[j]);
-            }
-          }
-        }
-      } catch {
-        /* keep analyzer/candidate locals only */
       }
 
       const unresolved = works.filter((w) => w.localId == null);
@@ -3040,6 +3076,8 @@ export class ViewerEngine {
         }
       };
 
+      this.productionBoltGuidAllowlistSnapshot = new Set(boltKeyToRawGuid.keys());
+
       const group = new THREE.Group();
       group.name = "production-hole-overlays";
 
@@ -3048,7 +3086,12 @@ export class ViewerEngine {
       const quat = new THREE.Quaternion();
       const size = new THREE.Vector3();
       const center = new THREE.Vector3();
+      /**
+       * De-dupe nearly identical discs **per bolt** only. A joint uses one physical pose; rounding
+       * made secondary fasteners drop their discs when the primary already placed the same key.
+       */
       const markerKeys = new Set<string>();
+      const tmpDiscWorld = new THREE.Vector3();
       const markerMaterial = new THREE.MeshBasicMaterial({
         /** Solid hole reference — filled disc, not a ring mesh. */
         color: 0xff1010,
@@ -3062,11 +3105,22 @@ export class ViewerEngine {
       });
 
       /** `radius` = hole radius in model metres (typically {@link diameterM} / 2). */
-      const addMarkerDisc = (position: THREE.Vector3, normal: THREE.Vector3, radius: number) => {
+      const addMarkerDisc = (
+        position: THREE.Vector3,
+        normal: THREE.Vector3,
+        radius: number,
+        dedupeId: string,
+      ) => {
+        if (steelDiscClipBoxWorld) {
+          tmpDiscWorld.copy(position).applyMatrix4(this.modelObject!.matrixWorld);
+          if (steelDiscClipBoxWorld.distanceToPoint(tmpDiscWorld) > 1e-3) {
+            return;
+          }
+        }
         const holeR = Math.max(radius, 0.003);
-        const key = `${position.x.toFixed(3)},${position.y.toFixed(3)},${position.z.toFixed(
-          3,
-        )}:${normal.x.toFixed(1)},${normal.y.toFixed(1)},${normal.z.toFixed(1)}:${holeR.toFixed(4)}`;
+        const key = `${dedupeId}|${position.x.toFixed(4)},${position.y.toFixed(4)},${position.z.toFixed(
+          4,
+        )}|${normal.x.toFixed(2)},${normal.y.toFixed(2)},${normal.z.toFixed(2)}|${holeR.toFixed(4)}`;
         if (markerKeys.has(key)) return;
         markerKeys.add(key);
         const geom = new THREE.CircleGeometry(holeR, 64);
@@ -3245,49 +3299,6 @@ export class ViewerEngine {
         return out;
       };
 
-      if (productionProbeBox) {
-        const maxComponentDiagonal = THREE.MathUtils.clamp(productionSteelDiag * 0.09, 0.025, 0.35);
-        for (const meshes of tileMeshesById.values()) {
-          for (const mesh of meshes) {
-            if (!mesh.geometry) continue;
-            const pos = mesh.geometry.getAttribute("position");
-            if (!pos) continue;
-            const indexArray = mesh.geometry.index?.array ?? null;
-            const fullCount = indexArray ? indexArray.length : pos.count;
-            forEachEffectiveWorldMatrix(mesh, (world) => {
-              const sceneBoxes = componentBoxesFromLiveTileRange(
-                pos,
-                indexArray,
-                0,
-                fullCount,
-                world,
-              );
-              for (const box of sceneBoxes) {
-                if (!productionProbeBox.intersectsBox(box)) continue;
-                box.getSize(size);
-                box.getCenter(center);
-                const diag = size.length();
-                if (diag < 0.004 || diag > maxComponentDiagonal) continue;
-                const dims = [size.x, size.y, size.z].sort((a, b) => a - b);
-                if (dims[1] < 0.002) continue;
-                let axis = 0;
-                let longLen = size.x;
-                if (size.y > longLen) {
-                  longLen = size.y;
-                  axis = 1;
-                }
-                if (size.z > longLen) {
-                  longLen = size.z;
-                  axis = 2;
-                }
-                axisDir.set(0, 0, 0).setComponent(axis, 1);
-                addMarkerDisc(center, axisDir, Math.max(dims[0] * 0.5, 0.006));
-              }
-            });
-          }
-        }
-      }
-
       const matrix4FromIfcAxisPlacement = (t: {
         position: number[];
         xDirection: number[];
@@ -3340,7 +3351,7 @@ export class ViewerEngine {
          * Exporters also emit **several samples along one bolt** (head, shank, nut meshes). Those
          * are collinear — cluster them and keep **one** ring at the hole mouth (closest to steel).
          */
-        let markersFromSamples = 0;
+        let placedForBolt = 0;
         try {
           const elements = await fragModel._getElements([work.localId]);
           const holeRadius =
@@ -3376,7 +3387,8 @@ export class ViewerEngine {
             sampleCandidates,
             BOLT_SAMPLE_CLUSTER_PERP_TOL_M,
           );
-          for (const cl of clusters) {
+          for (let ci = 0; ci < clusters.length; ci++) {
+            const cl = clusters[ci]!;
             const pick = pickHoleLikeSampleForCluster(
               cl,
               steelRefBoxWorld,
@@ -3384,14 +3396,14 @@ export class ViewerEngine {
               steelPickWorld,
               steelPickClosest,
             );
-            addMarkerDisc(pick.pos, pick.axis, holeRadius);
-            markersFromSamples++;
+            addMarkerDisc(pick.pos, pick.axis, holeRadius, `${work.boltKey}:sample:${ci}`);
+            placedForBolt++;
           }
         } catch {
           /* geometry fallback below */
         }
 
-        if (markersFromSamples > 0) {
+        if (placedForBolt > 0) {
           continue;
         }
 
@@ -3539,13 +3551,50 @@ export class ViewerEngine {
           if (fallbackComp) components = [fallbackComp];
         }
 
-        for (const c of components) {
+        for (let ci = 0; ci < components.length; ci++) {
+          const c = components[ci]!;
           const radius =
             diameterM != null
               ? Math.max(diameterM / 2, 0.004)
               : Math.max(c.midLen * 0.45, 0.008);
           axisDir.set(0, 0, 0).setComponent(c.axis, 1);
-          addMarkerDisc(c.center, axisDir, radius);
+          addMarkerDisc(c.center, axisDir, radius, `${work.boltKey}:mesh:${ci}`);
+          placedForBolt++;
+        }
+
+        /**
+         * Last resort for joint bolts on “secondary” members: worker element trees sometimes ship
+         * empty `core.samples`, and mesh heuristics may yield no component — the fragment AABB
+         * still sits on the isolated steel.
+         */
+        if (placedForBolt === 0) {
+          const fb = await fetchFallbackBoxForLocal(work.localId);
+          if (fb instanceof THREE.Box3 && !fb.isEmpty()) {
+            const nearSteel =
+              !steelRefBoxWorld ||
+              steelRefBoxWorld.isEmpty() ||
+              steelRefBoxWorld.clone().expandByScalar(0.42).intersectsBox(fb);
+            if (nearSteel) {
+              fb.getCenter(center);
+              fb.getSize(size);
+              let longAxis = 0;
+              let longLen = size.x;
+              if (size.y > longLen) {
+                longLen = size.y;
+                longAxis = 1;
+              }
+              if (size.z > longLen) {
+                longLen = size.z;
+                longAxis = 2;
+              }
+              axisDir.set(0, 0, 0).setComponent(longAxis, 1);
+              const fr =
+                diameterM != null
+                  ? Math.max(diameterM / 2, 0.004)
+                  : Math.max(Math.min(size.x, size.y, size.z) * 0.42, 0.008);
+              addMarkerDisc(center, axisDir, fr, `${work.boltKey}:bbox-fallback`);
+            }
+          }
         }
       }
 
@@ -3979,6 +4028,16 @@ export class ViewerEngine {
     }
     if (c.includes("VOIDINGFEATURE")) return true;
     return false;
+  }
+
+  /** True for bolt / screw‑style IFC products (excludes broad `IfcDiscreteAccessory` plates, etc.). */
+  private isIfcMechanicalStyleFastenerCategory(categoryRaw: string | undefined): boolean {
+    const c = (categoryRaw ?? "").toUpperCase();
+    return (
+      c.includes("MECHANICALFASTENER") ||
+      c.includes("IFCFASTENER") ||
+      (c.includes("FASTENER") && !c.includes("GRID"))
+    );
   }
 
   /**
