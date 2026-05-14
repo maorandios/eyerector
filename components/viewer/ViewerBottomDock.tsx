@@ -38,6 +38,8 @@ import {
   Funnel,
   Fullscreen,
   LayoutList,
+  Layers2,
+  Hammer,
   Pencil,
   RotateCcw,
   RulerDimensionLine,
@@ -52,6 +54,7 @@ import { cn } from "@/lib/utils";
 import type { IsolationMode } from "@/lib/state/isolation-store";
 
 type SelectionMode = "part" | "assembly";
+type AppMode = "management" | "production";
 
 export type ElementIsolationHudProps = {
   isolationMode: IsolationMode;
@@ -134,6 +137,8 @@ function ViewPresetIcon({
 }
 
 interface Props {
+  appMode?: AppMode;
+  onAppModeChange?: (mode: AppMode) => void;
   selectionMode: SelectionMode;
   onSelectionModeChange: (mode: SelectionMode) => void;
   onDashboard: () => void;
@@ -206,6 +211,8 @@ interface Props {
  * Primary viewer chrome: dashboard, element mode drop‑up, measurement (+ breakdown panel).
  */
 export function ViewerBottomDock({
+  appMode = "management",
+  onAppModeChange,
   selectionMode,
   onSelectionModeChange,
   onDashboard,
@@ -255,6 +262,7 @@ export function ViewerBottomDock({
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
   const [clipOpen, setClipOpen] = useState(false);
+  const [appModeOpen, setAppModeOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -263,6 +271,7 @@ export function ViewerBottomDock({
         setElementOpen(false);
         setViewOpen(false);
         setClipOpen(false);
+        setAppModeOpen(false);
       }
     };
     document.addEventListener("pointerdown", onDoc, true);
@@ -275,6 +284,14 @@ export function ViewerBottomDock({
       setElementOpen(false);
     },
     [onSelectionModeChange],
+  );
+
+  const pickAppMode = useCallback(
+    (m: AppMode) => {
+      onAppModeChange?.(m);
+      setAppModeOpen(false);
+    },
+    [onAppModeChange],
   );
 
   const pickViewMode = useCallback(
@@ -393,6 +410,35 @@ export function ViewerBottomDock({
               onClick={() => pickElementMode("assembly")}
             >
               <SquaresUnite aria-hidden />
+            </DockSubmenuPill>
+          </DockSubmenuBar>
+        </div>
+      )}
+      {appModeOpen && onAppModeChange && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-label="בחירת מצב עבודה"
+          className="pointer-events-auto shrink-0"
+        >
+          <DockSubmenuBar>
+            <DockSubmenuPill
+              label="ניהול"
+              title="מצב ניהול"
+              selected={appMode === "management"}
+              aria-label="ניהול"
+              onClick={() => pickAppMode("management")}
+            >
+              <Layers2 aria-hidden />
+            </DockSubmenuPill>
+            <DockSubmenuPill
+              label="ייצור"
+              title="מצב ייצור"
+              selected={appMode === "production"}
+              aria-label="ייצור"
+              onClick={() => pickAppMode("production")}
+            >
+              <Hammer aria-hidden />
             </DockSubmenuPill>
           </DockSubmenuBar>
         </div>
@@ -616,6 +662,26 @@ export function ViewerBottomDock({
         )}
         dir="rtl"
       >
+        {onAppModeChange && (
+          <DockPillButton
+            label={appMode === "production" ? "ייצור" : "ניהול"}
+            aria-expanded={appModeOpen}
+            submenuOpen={appModeOpen}
+            className="[&_svg]:!text-[#003CFF]"
+            labelClassName={appModeOpen || appMode === "production" ? "text-zinc-900" : undefined}
+            title="בחירת מצב עבודה"
+            aria-label={appMode === "production" ? "מצב: ייצור" : "מצב: ניהול"}
+            onClick={() => {
+              setElementOpen(false);
+              setViewOpen(false);
+              setClipOpen(false);
+              setAppModeOpen((open) => !open);
+            }}
+          >
+            {appMode === "production" ? <Hammer aria-hidden /> : <Layers2 aria-hidden />}
+          </DockPillButton>
+        )}
+
         {onGlobalSearch && (
           <DockPillButton label="חיפוש" title="חיפוש במודל" aria-label="חיפוש" onClick={onGlobalSearch}>
             <Search aria-hidden />
@@ -691,6 +757,7 @@ export function ViewerBottomDock({
           onClick={() => {
             setViewOpen(false);
             setClipOpen(false);
+            setAppModeOpen(false);
             setElementOpen((o) => !o);
           }}
         >
@@ -730,6 +797,7 @@ export function ViewerBottomDock({
             if (viewModeDisabled) return;
             setElementOpen(false);
             setClipOpen(false);
+            setAppModeOpen(false);
             setViewOpen((o) => !o);
           }}
         >
@@ -771,6 +839,7 @@ export function ViewerBottomDock({
             if (clippingDisabled) return;
             setElementOpen(false);
             setViewOpen(false);
+            setAppModeOpen(false);
             setClipOpen((o) => !o);
           }}
         >

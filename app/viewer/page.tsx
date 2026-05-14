@@ -12,6 +12,13 @@ import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
+import {
+  ProductionModeOverlay,
+  type ProductionAppMode,
+  type ProductionPartRow,
+  type ProductionSelection,
+  type ProductionTab,
+} from "@/components/viewer/ProductionModeOverlay";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/lib/state/app-store";
 import { useClippingStore } from "@/lib/state/clipping-store";
@@ -159,6 +166,14 @@ export default function ViewerPage() {
   const [selectionMode, setSelectionMode] = useState<SelectionMode>("part");
   const [assemblyStructureNotice, setAssemblyStructureNotice] = useState(false);
   const [modelDataTab, setModelDataTab] = useState<ModelDataTab>("assemblies");
+  const [productionTab, setProductionTab] = useState<ProductionTab>("assemblies");
+  const [productionSearch, setProductionSearch] = useState("");
+  const [productionViewerOpen, setProductionViewerOpen] = useState(false);
+  const [productionSelection, setProductionSelection] = useState<ProductionSelection>({
+    type: null,
+    id: null,
+  });
+  const [productionPartsDrawerOpen, setProductionPartsDrawerOpen] = useState(false);
   const [selectedAssemblyId, setSelectedAssemblyId] = useState<string | null>(null);
   const [assemblyDetailOverride, setAssemblyDetailOverride] = useState<AnalyzerAssembly | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
@@ -186,6 +201,7 @@ export default function ViewerPage() {
     file,
     analyzerData,
     mode,
+    setMode,
     search,
     activeSheet,
     setActiveSheet,
@@ -196,6 +212,7 @@ export default function ViewerPage() {
     sketchModeEnabled,
     toggleSketchMode,
   } = useAppStore();
+  const appMode: ProductionAppMode = mode === "production" ? "production" : "management";
 
   const viewerTool = useViewerToolStore((s) => s.activeTool);
   const setViewerTool = useViewerToolStore((s) => s.setActiveTool);
@@ -374,7 +391,7 @@ export default function ViewerPage() {
       useSmartMeasureStore.getState().clearBreakdown();
     }
     if (viewerTool !== "flash") {
-      setFlashTooltip(null);
+      queueMicrotask(() => setFlashTooltip(null));
     }
   }, [viewerTool]);
 
@@ -568,6 +585,35 @@ export default function ViewerPage() {
     [filteredParts],
   );
 
+  const productionAssemblyRows = useMemo(() => {
+    const q = productionSearch.trim().toLowerCase();
+    const list = analyzerData?.assemblies ?? [];
+    const filtered = q
+      ? list.filter(
+          (a) =>
+            (a.assemblyMark || "").toLowerCase().includes(q) ||
+            (a.name || "").toLowerCase().includes(q) ||
+            (a.tag || "").toLowerCase().includes(q) ||
+            (a.positionCode || "").toLowerCase().includes(q),
+        )
+      : list;
+    return aggregateAssembliesByMark(filtered);
+  }, [analyzerData?.assemblies, productionSearch]);
+
+  const productionPartRows = useMemo(() => {
+    const q = productionSearch.trim().toLowerCase();
+    const filtered = q
+      ? steelPartsAll.filter(
+          (p) =>
+            (p.tag || "").toLowerCase().includes(q) ||
+            (p.partMark || "").toLowerCase().includes(q) ||
+            (p.name || "").toLowerCase().includes(q) ||
+            (p.profile || "").toLowerCase().includes(q),
+        )
+      : steelPartsAll;
+    return aggregateSteelPartsForModelTab(filtered);
+  }, [productionSearch, steelPartsAll]);
+
   const selectedAssembly = useMemo(() => {
     if (assemblyDetailOverride && assemblyDetailOverride.id === selectedAssemblyId) {
       return assemblyDetailOverride;
@@ -578,6 +624,20 @@ export default function ViewerPage() {
     () => analyzerData?.parts.find((p) => p.id === selectedPartId) || null,
     [analyzerData, selectedPartId],
   );
+  const productionSelectionTitle = useMemo(() => {
+    if (productionSelection.type === "assembly" && selectedAssembly) {
+      return (
+        selectedAssembly.assemblyMark ||
+        selectedAssembly.name ||
+        selectedAssembly.tag ||
+        selectedAssembly.id
+      );
+    }
+    if (productionSelection.type === "part" && selectedPart && !isAnalyzerBoltRow(selectedPart)) {
+      return displayPartMark(selectedPart);
+    }
+    return "מצב ייצור";
+  }, [productionSelection.type, selectedAssembly, selectedPart]);
 
   /** Part / profile isolation: refs + GUID sets (links with assembly fallback; spatial pass links-only when present). */
   const partIsolationBoltPolicy = useMemo(() => {
@@ -1105,6 +1165,105 @@ export default function ViewerPage() {
     setSelectionStatus("נוקה");
   }, [engine, clearEngineSelectionPreservingViewFilter]);
 
+  const isolateProductionRefs = useCallback(
+    async (refs: readonly { id: string; expressId: number | null }[]) => {
+      if (!engine || refs.length === 0) return;
+      const ids = await engine.resolveIsolationLocalIds(refs);
+      if (ids.size === 0) return;
+      await applyIsolationModeToLocalIds("isolated", ids, { focus: false });
+    },
+    [engine, applyIsolationModeToLocalIds],
+  );
+
+  const handleAppModeChange = useCallback(
+    (nextMode: ProductionAppMode) => {
+      if (appMode === nextMode) return;
+      setMode(nextMode);
+      setGlobalSearchOpen(false);
+      setElementContextPanel(null);
+      setFlashTooltip(null);
+      setSnapshotSessionOpen(false);
+      setMarkupDrawingEnabled(false);
+      setViewerTool("none");
+      setActiveSheet("none");
+      setProductionPartsDrawerOpen(false);
+
+      if (nextMode === "production") {
+        setProductionViewerOpen(false);
+        setProductionSelection({ type: null, id: null });
+        return;
+      }
+
+      setProductionViewerOpen(false);
+      setProductionSelection({ type: null, id: null });
+      void restoreFullModelIsolationState();
+      void clearViewerSelection();
+    },
+    [
+      appMode,
+      clearViewerSelection,
+      restoreFullModelIsolationState,
+      setActiveSheet,
+      setMode,
+      setViewerTool,
+    ],
+  );
+
+  const openProductionAssembly = useCallback(
+    async (row: AggregatedAssemblyRow) => {
+      const primary = row.instances[0];
+      if (!primary) return;
+      const refs = row.instances.flatMap((assembly) => analyzerRefsFromAssembly(assembly));
+      setProductionSelection({ type: "assembly", id: primary.id });
+      setProductionViewerOpen(true);
+      setProductionPartsDrawerOpen(false);
+      setGlobalSearchOpen(false);
+      setActiveSheet("none");
+      await selectAggregatedAssemblyRow(row);
+      setActiveSheet("none");
+      await isolateProductionRefs(refs);
+    },
+    [isolateProductionRefs, selectAggregatedAssemblyRow, setActiveSheet],
+  );
+
+  const openProductionPart = useCallback(
+    async (row: ProductionPartRow) => {
+      const first = row.instances[0];
+      if (!first) return;
+      const refs = row.instances.map((part) => ({ id: part.id, expressId: part.expressId }));
+      setProductionSelection({ type: "part", id: first.id });
+      setProductionViewerOpen(true);
+      setProductionPartsDrawerOpen(false);
+      setGlobalSearchOpen(false);
+      setActiveSheet("none");
+      await selectPartInstances(row.instances);
+      setActiveSheet("none");
+      await isolateProductionRefs(refs);
+    },
+    [isolateProductionRefs, selectPartInstances, setActiveSheet],
+  );
+
+  const handleProductionBackToLists = useCallback(async () => {
+    setProductionViewerOpen(false);
+    setProductionSelection({ type: null, id: null });
+    setProductionPartsDrawerOpen(false);
+    setViewerTool("none");
+    setActiveSheet("none");
+    await restoreFullModelIsolationState();
+    await clearViewerSelection();
+  }, [clearViewerSelection, restoreFullModelIsolationState, setActiveSheet, setViewerTool]);
+
+  const handleProductionPickAssemblyPart = useCallback(
+    async (part: AnalyzerPart) => {
+      if (!engine) return;
+      const refs = [{ id: part.id, expressId: part.expressId }];
+      await applySelectionVisuals(refs);
+      await engine.focusAnalyzerSubset(refs);
+      setSelectionStatus(`חלק: ${displayPartMark(part)}`);
+    },
+    [applySelectionVisuals, engine],
+  );
+
   const handleGlobalSearchPickAssembly = useCallback(
     async (a: AnalyzerAssembly) => {
       setGlobalSearchOpen(false);
@@ -1568,7 +1727,7 @@ export default function ViewerPage() {
       snapshotSessionOpen ||
       markupDrawingEnabled
     ) {
-      setFlashTooltip(null);
+      queueMicrotask(() => setFlashTooltip(null));
       return;
     }
 
@@ -1881,6 +2040,27 @@ export default function ViewerPage() {
 
       <ViewerSnapshotToasts copyToastVisible={snapshotCopyToast} />
 
+      <ProductionModeOverlay
+        visible={appMode === "production"}
+        viewerOpen={productionViewerOpen}
+        loading={loadingState !== "ready" || !analyzerData}
+        tab={productionTab}
+        search={productionSearch}
+        assemblyRows={productionAssemblyRows}
+        partRows={productionPartRows}
+        selectedAssembly={selectedAssembly}
+        selectionTitle={productionSelectionTitle}
+        selectionKind={productionSelection.type}
+        partsDrawerOpen={productionPartsDrawerOpen}
+        onTabChange={setProductionTab}
+        onSearchChange={setProductionSearch}
+        onPickAssembly={(row) => void openProductionAssembly(row)}
+        onPickPart={(row) => void openProductionPart(row)}
+        onBackToLists={() => void handleProductionBackToLists()}
+        onPartsDrawerClose={() => setProductionPartsDrawerOpen(false)}
+        onPickAssemblyPart={(part) => void handleProductionPickAssemblyPart(part)}
+      />
+
       <div
         className="pointer-events-auto absolute inset-x-0 top-0 z-40 flex h-10 items-center justify-between border-b border-zinc-300/80 bg-[#e8ecef] px-3 pt-[env(safe-area-inset-top)] shadow-[0_8px_22px_rgba(39,39,42,0.07)]"
         dir="ltr"
@@ -1922,6 +2102,7 @@ export default function ViewerPage() {
       </div>
 
       {elementContextPanel &&
+        appMode === "management" &&
         !snapshotSessionOpen &&
         viewerTool !== "measurement" &&
         viewerTool !== "flash" &&
@@ -1935,7 +2116,7 @@ export default function ViewerPage() {
           />
         )}
 
-      {flashTooltip && viewerTool === "flash" && !snapshotSessionOpen && !markupDrawingEnabled ? (
+      {flashTooltip && appMode === "management" && viewerTool === "flash" && !snapshotSessionOpen && !markupDrawingEnabled ? (
         <div
           className="pointer-events-none fixed z-[55] w-[17.5rem] rounded-2xl border border-zinc-300/90 bg-white/95 p-3 text-zinc-800 shadow-[0_18px_45px_rgba(39,39,42,0.22)] ring-1 ring-white/70 backdrop-blur-md"
           style={{ left: flashTooltip.x, top: flashTooltip.y }}
@@ -1971,6 +2152,8 @@ export default function ViewerPage() {
       ) : null}
 
       <ViewerBottomDock
+        appMode={appMode}
+        onAppModeChange={handleAppModeChange}
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
         onDashboard={toggleDashboardSheet}
@@ -2106,7 +2289,7 @@ export default function ViewerPage() {
         />
       )}
 
-      {showFilterPanel && (
+      {appMode === "management" && showFilterPanel && (
         <div
           ref={sidePanelSnapshotRef}
           className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}
@@ -2124,7 +2307,7 @@ export default function ViewerPage() {
         </div>
       )}
 
-      {showDataPanel && (
+      {appMode === "management" && showDataPanel && (
         <div
           ref={sidePanelSnapshotRef}
           className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}
