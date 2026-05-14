@@ -47,6 +47,7 @@ import {
 import {
   boundingBoxHalfExtentsInOrthoCameraPlane,
   fitOrthoSymmetricFrustum,
+  orthoContentHalfExtentsForViewMode,
   pickInspectionViewModeFromBox,
 } from "@/lib/viewer/inspection-view";
 import {
@@ -530,7 +531,11 @@ export class ViewerEngine {
     void ctrl.update(0);
   }
 
-  private updateOrthoFrustum(box: THREE.Box3, dockChromeFitting = false) {
+  private updateOrthoFrustum(
+    box: THREE.Box3,
+    dockChromeFitting = false,
+    mode?: ViewModeId,
+  ) {
     const renderer = this.world.renderer as OBF.RendererWith2D;
     const el = renderer.container;
     const w = el.clientWidth;
@@ -538,10 +543,30 @@ export class ViewerEngine {
     const topPad = dockChromeFitting ? VIEWER_TOP_CHROME_PX : 0;
     const bottomPad = dockChromeFitting ? VIEWER_BOTTOM_DOCK_RESERVE_PX : 0;
     const hEff = Math.max(h - topPad - bottomPad, 1);
-    const aspect = w > 0 && h > 0 ? w / hEff : 1;
+    const aspect = w > 0 && h > 0 ? w / h : 1;
     let marginFactor = this.inspectionSessionFramingBox !== null ? INSPECTION_ORTHO_MARGIN : ORTHO_MARGIN;
     if (dockChromeFitting && this.inspectionSessionFramingBox === null) {
       marginFactor *= ORTHO_VIEW_DOCK_EXTRA_MARGIN;
+    }
+    if (mode) {
+      const size = box.getSize(new THREE.Vector3());
+      const extents = orthoContentHalfExtentsForViewMode(mode, size);
+      const visibleHeightScale = dockChromeFitting && h > 0 ? h / hEff : 1;
+      const { halfWidth, halfHeight } = fitOrthoSymmetricFrustum(
+        extents.horizontal,
+        extents.vertical * visibleHeightScale,
+        aspect,
+        marginFactor,
+      );
+      const ortho = this.orthographicCamera;
+      ortho.left = -halfWidth;
+      ortho.right = halfWidth;
+      ortho.top = halfHeight;
+      ortho.bottom = -halfHeight;
+      ortho.near = 0.01;
+      ortho.far = 1e6;
+      ortho.updateProjectionMatrix();
+      return;
     }
     this.updateOrthoFrustumForAspect(box, aspect, marginFactor);
   }
@@ -624,7 +649,7 @@ export class ViewerEngine {
       if (this.inspectionSessionFramingBox !== null && this.activeOrthoViewMode !== null) {
         this.updateOrthoFrustumForInspectionSnapshot(box);
       } else {
-        this.updateOrthoFrustum(box, true);
+        this.updateOrthoFrustum(box, true, this.activeOrthoViewMode ?? undefined);
       }
       this.applyBottomDockOrthoFocalCompensation();
     };
@@ -686,7 +711,7 @@ export class ViewerEngine {
     const span = Math.max(size.x, size.y, size.z, 1);
     const distance = ORTHO_DISTANCE_K * span;
 
-    this.updateOrthoFrustum(box, true);
+    this.updateOrthoFrustum(box, true, mode);
 
     const simpleCam = this.world.camera as OBC.SimpleCamera;
     const ctrl = simpleCam.controls;
@@ -736,7 +761,7 @@ export class ViewerEngine {
     const span = Math.max(size.x, size.y, size.z, 1);
     const distance = ORTHO_DISTANCE_K * span;
 
-    this.updateOrthoFrustum(box, true);
+    this.updateOrthoFrustum(box, true, mode);
 
     const mode = this.userClipDirection;
     const simpleCam = this.world.camera as OBC.SimpleCamera;
@@ -1991,21 +2016,16 @@ export class ViewerEngine {
   }
 
   /**
-   * Activates/deactivates מצב מדידה. On exit from measurement: clears overlays/lines plus restores the
-   * camera/frustum from before measurement (pan/zoom drift must not persist). Returns the snapshot applied
-   * on exit so the host can sync orthographic toolbar state ({@link ViewerCameraRevertSnapshot.orthoMode}).
+   * Activates/deactivates מצב מדידה. On exit from measurement: clears overlays/lines while preserving
+   * the current camera pose exactly where the user left it.
    */
   setViewerTool(tool: ViewerToolMode): ViewerCameraRevertSnapshot | undefined {
     if (this.disposed) return undefined;
     const prevTool = this.viewerTool;
     const ctrl = this.world.camera.controls;
 
-    let measurementExitRestoredSnap: ViewerCameraRevertSnapshot | undefined;
-
     if (tool === "measurement") {
-      if (prevTool !== "measurement") {
-        this.measurementSessionCameraRevert = this.captureCameraRevertSnapshot();
-      }
+      if (prevTool !== "measurement") this.measurementSessionCameraRevert = null;
       this.viewerTool = tool;
       if (ctrl && MeasurementController.prefersTouchLikeMeasurement()) {
         this.measurementControlsEnabledSnapshot = ctrl.enabled;
@@ -2017,19 +2037,7 @@ export class ViewerEngine {
     } else {
       if (prevTool === "measurement") {
         this.measurementController.clearAll();
-        const revert = this.measurementSessionCameraRevert;
-        if (revert !== null) {
-          measurementExitRestoredSnap = revert;
-          const insideInspection = this.isInspectionVisualizationSessionActive();
-          this.restoreCameraRevertSnapshot(revert, {
-            preserveInspectionSession: insideInspection,
-          });
-          /** After מדידה inside מצב בדיקה the ortho frustum may need refit once camera pose is back. */
-          if (insideInspection && this.inspectionSessionFramingBox && !this.inspectionSessionFramingBox.isEmpty()) {
-            this.updateOrthoFrustumForInspectionSnapshot(this.inspectionSessionFramingBox);
-          }
-          this.measurementSessionCameraRevert = null;
-        }
+        this.measurementSessionCameraRevert = null;
       }
       this.viewerTool = tool;
       this.measurementController.deactivate();
@@ -2038,7 +2046,7 @@ export class ViewerEngine {
         this.measurementSuppressedControls = false;
       }
     }
-    return measurementExitRestoredSnap;
+    return undefined;
   }
 
   getViewerTool(): ViewerToolMode {
@@ -3909,11 +3917,6 @@ export class ViewerEngine {
         return;
       }
 
-      if (this.isolationVisualMode !== "none") {
-        await this.applyIsolationImpl(this.isolationVisualMode, ids, { focus: false });
-        return;
-      }
-
       await fragments.resetHighlight();
       await fragments.highlight(this.highlightMaterialParams(), map);
       await this.syncFragmentsViewForced(fragments);
@@ -3931,8 +3934,8 @@ export class ViewerEngine {
   }
 
   /**
-   * Highlight an arbitrary set of fragment **local** ids (multi-select). No-op when isolation visuals
-   * are active — user should reset view first. Serialized with isolation/highlight RPCs.
+   * Highlight an arbitrary set of fragment **local** ids (multi-select). Serialized with
+   * isolation/highlight RPCs so active hide/isolate states can still accept a new candidate selection.
    */
   async highlightFragmentLocalSet(ids: Set<number>): Promise<void> {
     if (!this.modelId) return;
@@ -3940,7 +3943,6 @@ export class ViewerEngine {
       if (this.disposed) return;
       const fragments = this.components.get(OBC.FragmentsManager);
       if (!fragments.initialized) return;
-      if (this.isolationVisualMode !== "none") return;
       const fragModel = this.modelId ? fragments.list.get(this.modelId) : null;
 
       if (ids.size === 0) {

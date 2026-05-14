@@ -497,7 +497,7 @@ export function ViewerBottomDock({
           </DockSubmenuBar>
         </div>
       ) : null}
-      {markupDrawingActive && onMarkupDrawingToggle ? (
+      {markupDrawingActive && !snapshotSessionOpen && onMarkupDrawingToggle ? (
         <div
           className="pointer-events-auto flex w-full shrink-0 justify-center"
           role="region"
@@ -545,12 +545,30 @@ export function ViewerBottomDock({
           aria-label="צילום מסך"
         >
           <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
+            {onMarkupDrawingToggle ? (
+              <DockSubmenuPill
+                label="ציור"
+                labelClassName="max-w-[3.5rem] text-zinc-700 sm:max-w-[3.75rem]"
+                title="ציור על צילום המסך לפני העתקה או הורדה"
+                aria-label="ציור"
+                className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
+                selected={markupDrawingActive}
+                disabled={markupDrawingDisabled}
+                onClick={() => {
+                  if (markupDrawingActive) onMarkupDrawingClear?.();
+                  onMarkupDrawingToggle();
+                }}
+              >
+                <Pencil aria-hidden />
+              </DockSubmenuPill>
+            ) : null}
             <DockSubmenuPill
               label="העתקה"
               labelClassName="max-w-[3.5rem] text-zinc-700 sm:max-w-[3.75rem]"
               title="העתקת התמונה ללוח"
               aria-label="העתקה"
               className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
+              disabled={snapshotCapturePending}
               onClick={() => onSnapshotCopy()}
             >
               <Images aria-hidden />
@@ -561,6 +579,7 @@ export function ViewerBottomDock({
               title="הורדת קובץ PNG"
               aria-label="הורדה"
               className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
+              disabled={snapshotCapturePending}
               onClick={() => onSnapshotDownload()}
             >
               <ImageDown aria-hidden />

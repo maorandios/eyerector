@@ -23,18 +23,24 @@ export class SmartMeasureVisuals {
   private readonly completed = new THREE.Group();
   private draftLine: THREE.Line | null = null;
 
-  private readonly matMain = new THREE.LineBasicMaterial({ color: MAIN_COLOR, depthTest: true });
+  private readonly matMain = new THREE.LineBasicMaterial({
+    color: MAIN_COLOR,
+    depthTest: true,
+    linewidth: 2,
+  });
   private readonly matDraft = new THREE.LineBasicMaterial({
     color: DRAFT_COLOR,
     depthTest: true,
     transparent: true,
     opacity: 0.75,
+    linewidth: 1.5,
   });
   private readonly matBreak = new THREE.LineBasicMaterial({
     color: BREAKDOWN_COLOR,
     depthTest: true,
     transparent: true,
     opacity: 0.9,
+    linewidth: 1.5,
   });
 
   constructor() {

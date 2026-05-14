@@ -108,15 +108,18 @@ export class SmartMeasureOverlay {
         el.tabIndex = 0;
         el.setAttribute("role", "button");
         el.dataset.eyeSteelSegmentIndex = String(idx);
+        el.onpointerenter = () => this.hideSnap();
         el.onpointerdown = (e) => {
           e.preventDefault();
           e.stopPropagation();
+          this.hideSnap();
           onPickSegment(idx);
         };
       } else {
         el.tabIndex = -1;
         el.removeAttribute("role");
         delete el.dataset.eyeSteelSegmentIndex;
+        el.onpointerenter = null;
         el.onpointerdown = null;
       }
 

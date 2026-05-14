@@ -2,7 +2,7 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Binoculars, EyeOff, Scan, SquaresSubtract } from "lucide-react";
+import { EyeOff, Scan, SquaresSubtract } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** Marker for global dismiss handlers (see viewer page). */
@@ -12,7 +12,6 @@ export type ElementPickContextPanelState = {
   clientX: number;
   clientY: number;
   isolationLocalIds: number[];
-  showInspect: boolean;
 };
 
 type Props = {
@@ -20,17 +19,14 @@ type Props = {
   onIsolate: () => void;
   onContext: () => void;
   onHide: () => void;
-  onInspect: () => void;
 };
 
 /** Compact rows: under `dir="rtl"`, icon first in DOM sits to the *visual* right of the label. */
 const rowBtn =
   "flex h-auto w-full min-w-0 flex-row items-center justify-start gap-1 rounded-lg border-0 bg-transparent px-1.5 py-1.5 text-right text-xs font-medium text-zinc-100 shadow-none hover:bg-zinc-800/45 active:scale-[0.99] [&_svg]:size-[0.88rem] [&_svg]:shrink-0";
 
-/**
- * Vertical action rail at the pick point — same icons as {@link MultiSelectActionBar}; בדיקה uses binoculars (מבט בדיקה).
- */
-export function ElementPickContextPanel({ state, onIsolate, onContext, onHide, onInspect }: Props) {
+/** Vertical action rail at the pick point — same icons as {@link MultiSelectActionBar}. */
+export function ElementPickContextPanel({ state, onIsolate, onContext, onHide }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: state.clientX, top: state.clientY });
 
@@ -74,16 +70,6 @@ export function ElementPickContextPanel({ state, onIsolate, onContext, onHide, o
         <Button type="button" variant="ghost" className={cn(rowBtn)} disabled={noIds} onClick={onHide}>
           <EyeOff aria-hidden className="shrink-0" />
           <span className="min-w-0 whitespace-nowrap text-right leading-tight">הסתרה</span>
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          className={cn(rowBtn)}
-          disabled={!state.showInspect}
-          onClick={onInspect}
-        >
-          <Binoculars aria-hidden className="shrink-0" />
-          <span className="min-w-0 whitespace-nowrap text-right leading-tight">בדיקה</span>
         </Button>
       </div>
     </div>

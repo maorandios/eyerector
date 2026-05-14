@@ -81,9 +81,10 @@ export const DrawingMarkupLayer = forwardRef<
     active: boolean;
     /** Increments when user taps נקה — clears all ink. */
     clearSignal: number;
+    elevated?: boolean;
     onInkPresenceChange?: (hasInk: boolean) => void;
   }
->(function DrawingMarkupLayer({ active, clearSignal, onInkPresenceChange }, ref) {
+>(function DrawingMarkupLayer({ active, clearSignal, elevated, onInkPresenceChange }, ref) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -209,7 +210,8 @@ export const DrawingMarkupLayer = forwardRef<
     <div
       ref={wrapRef}
       className={cn(
-        "absolute inset-0 z-[25] touch-none select-none",
+        "absolute inset-0 touch-none select-none",
+        elevated ? "z-[46]" : "z-[25]",
         active ? "pointer-events-auto cursor-crosshair" : "pointer-events-none",
       )}
       onPointerDown={onPointerDown}

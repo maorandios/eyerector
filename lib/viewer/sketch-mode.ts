@@ -120,6 +120,8 @@ function applyContextSketchWireLodOpacity(wireMat: THREE.Material): void {
   const m = wireMat as LodLikeMaterial;
   if (activeContextSketchEdgeOpacity != null) {
     m.lodOpacity = activeContextSketchEdgeOpacity;
+  } else if (sketchUnifiedLodStrokeColor) {
+    m.lodOpacity = SKETCH_MODE_TECHNICAL_STROKE_OPACITY;
   } else {
     m.lodOpacity = 1;
   }
@@ -127,6 +129,7 @@ function applyContextSketchWireLodOpacity(wireMat: THREE.Material): void {
 
 /** When שרטוט mode is active, all mesh sketch strokes use this dark gray instead of IFC face hues. */
 export const SKETCH_MODE_TECHNICAL_STROKE = new THREE.Color(0x52525b);
+const SKETCH_MODE_TECHNICAL_STROKE_OPACITY = 0.7;
 
 const SKETCH_UNIFIED_ORIG_MAT_UD = "eyeSteelSketchUnifiedOrigMat";
 
@@ -241,7 +244,12 @@ function createEdgeLineMaterial(lineRgb: THREE.Color): THREE.LineBasicMaterial {
 
 /** Shared dark-gray stroke line for שרטוט mode (technical drawing — not IFC face hues). */
 export function createTechnicalSketchLineBasicMaterial(): THREE.LineBasicMaterial {
-  return createEdgeLineMaterial(SKETCH_MODE_TECHNICAL_STROKE);
+  const material = createEdgeLineMaterial(SKETCH_MODE_TECHNICAL_STROKE);
+  material.transparent = true;
+  material.opacity = SKETCH_MODE_TECHNICAL_STROKE_OPACITY;
+  material.depthWrite = false;
+  material.needsUpdate = true;
+  return material;
 }
 
 function getOrCreateEdgeLineMaterial(
@@ -331,15 +339,19 @@ function syncLodSketchWireframeFromSource(dst: THREE.Material, src: THREE.Materi
   d.lodSize.copy(s.lodSize);
   if (sketchUnifiedLodStrokeColor) {
     d.lodColor.copy(sketchUnifiedLodStrokeColor);
+    d.lodOpacity = SKETCH_MODE_TECHNICAL_STROKE_OPACITY;
   } else {
     d.lodColor.copy(edgeLineColorFromFace(s.lodColor));
   }
 }
 
 function createSketchWireframeMaterial(lineColor: THREE.Color): THREE.MeshBasicMaterial {
+  const technicalSketchActive = sketchUnifiedLodStrokeColor !== null;
   return new THREE.MeshBasicMaterial({
     color: lineColor.clone(),
     wireframe: true,
+    transparent: technicalSketchActive,
+    opacity: technicalSketchActive ? SKETCH_MODE_TECHNICAL_STROKE_OPACITY : 1,
     toneMapped: false,
     depthTest: false,
   });
@@ -352,6 +364,7 @@ function cloneSketchInstancedOverlayMaterial(source: THREE.Material): THREE.Mate
     c.lodOpacity = 1;
     if (sketchUnifiedLodStrokeColor) {
       c.lodColor.copy(sketchUnifiedLodStrokeColor);
+      c.lodOpacity = SKETCH_MODE_TECHNICAL_STROKE_OPACITY;
     } else {
       c.lodColor.copy(edgeLineColorFromFace((source as LodLikeMaterial).lodColor));
     }

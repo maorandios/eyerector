@@ -20,15 +20,10 @@ import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { useViewerViewStore } from "@/lib/state/viewer-view-store";
 import { useIsolationStore } from "@/lib/state/isolation-store";
 import {
-  type InspectionRevertBundle,
-  useInspectionStore,
-} from "@/lib/state/inspection-store";
-import {
   type MultiSelectWeightItem,
   useMultiSelectStore,
 } from "@/lib/state/multi-select-store";
 import { ViewerEngine, type ApplyIsolationOptions } from "@/lib/viewer/engine";
-import { findAssemblyLabelForPart } from "@/lib/viewer/inspection-assembly";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
@@ -53,8 +48,6 @@ import {
   type ElementPickContextPanelState,
 } from "@/components/viewer/ElementPickContextPanel";
 import { ViewerSnapshotToasts } from "@/components/viewer/ViewerSnapshotToasts";
-import { InspectionModeToolbar } from "@/components/viewer/InspectionModeToolbar";
-import { InspectionPanel } from "@/components/viewer/InspectionPanel";
 import { GlobalSearchOverlay } from "@/components/viewer/GlobalSearchOverlay";
 import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
 import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
@@ -128,6 +121,7 @@ export default function ViewerPage() {
   const [snapshotCapturePending, setSnapshotCapturePending] = useState(false);
   const snapshotBlobRef = useRef<Blob | null>(null);
   const snapshotCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sidePanelSnapshotRef = useRef<HTMLDivElement>(null);
   const {
     file,
     analyzerData,
@@ -151,9 +145,6 @@ export default function ViewerPage() {
   const clearViewModeStore = useViewerViewStore((s) => s.clearView);
 
   const isolationMode = useIsolationStore((s) => s.isolationMode);
-  const inspectionActive = useInspectionStore((s) => s.active);
-  const inspectionPartId = useInspectionStore((s) => s.selectedPartId);
-  const inspectionViewMode = useInspectionStore((s) => s.inspectionViewMode);
   const pickInteractionMode = useMultiSelectStore((s) => s.pickInteractionMode);
   const multiSelectedLocalIds = useMultiSelectStore((s) => s.selectedLocalIds);
   const multiSelectedCount = useMultiSelectStore((s) => s.selectedLocalIds.length);
@@ -257,8 +248,6 @@ export default function ViewerPage() {
     if (!engine) return;
     const exitSnap = engine.setViewerTool(viewerTool);
     if (!exitSnap) return;
-    /** During מצב בדיקה, measurement exit must not touch main מבט store (would force e.g. מבט על from inspection ortho). */
-    if (useInspectionStore.getState().active) return;
     if (exitSnap.orthoMode !== null) setOrthographicView(exitSnap.orthoMode);
     else clearViewModeStore();
   }, [engine, viewerTool, setOrthographicView, clearViewModeStore]);
@@ -275,7 +264,6 @@ export default function ViewerPage() {
     if (!engine || !file) return;
     clearViewModeStore();
     useAppStore.setState({ sketchModeEnabled: false });
-    useInspectionStore.getState().exit();
     setLoadingState("parsing");
     engine
       .loadFile(file)
@@ -512,17 +500,6 @@ export default function ViewerPage() {
     [analyzerData, selectedPartId],
   );
 
-  const inspectionPartResolved = useMemo((): AnalyzerPart | null => {
-    if (!inspectionPartId || !analyzerData) return null;
-    const p = analyzerData.parts.find((x) => x.id === inspectionPartId);
-    return p && !isAnalyzerBoltRow(p) ? (p as AnalyzerPart) : null;
-  }, [inspectionPartId, analyzerData]);
-
-  const inspectionAssemblyLabel = useMemo(() => {
-    if (!inspectionPartId || !analyzerData) return null;
-    return findAssemblyLabelForPart(inspectionPartId, analyzerData.assemblies ?? []);
-  }, [inspectionPartId, analyzerData]);
-
   /** Part / profile isolation: refs + GUID sets (links with assembly fallback; spatial pass links-only when present). */
   const partIsolationBoltPolicy = useMemo(() => {
     if (selectedAssembly) return null;
@@ -666,140 +643,6 @@ export default function ViewerPage() {
     return base;
   }, [partIsolationBoltPolicy]);
 
-  const handleEnterPartInspection = useCallback(async () => {
-    if (
-      !engine ||
-      !analyzerData ||
-      loadingState !== "ready" ||
-      !selectedPart ||
-      isAnalyzerBoltRow(selectedPart)
-    ) {
-      return;
-    }
-    if (useIsolationStore.getState().isolationMode !== "none") return;
-    if (useMultiSelectStore.getState().pickInteractionMode === "multi") return;
-
-    engine.discardMeasurementWorkspaceKeepCamera();
-    if (viewerTool === "measurement") {
-      setViewerTool("none");
-    }
-
-    const part = selectedPart as AnalyzerPart;
-    const framingRefs = [{ id: part.id, expressId: part.expressId }];
-    const seedArr = await engine.resolveIsolationLocalIds(framingRefs);
-    const seedIds = new Set(seedArr);
-    if (seedIds.size === 0) return;
-
-    const box = await engine.getMergedWorldBoundingBoxForLocalIds(seedIds);
-    if (!box || box.isEmpty()) return;
-
-    const orthoMode = engine.inspectionSuggestedOrthoMode(box);
-
-    const bundle: InspectionRevertBundle = {
-      camera: engine.captureCameraRevertSnapshot(),
-      sketchModeEnabled: useAppStore.getState().sketchModeEnabled,
-      viewModeUi: useViewerViewStore.getState().viewMode,
-      clipping: engine.getClippingUiSnapshot(),
-      isolationModeBefore: useIsolationStore.getState().isolationMode,
-    };
-
-    engine.clearClipping();
-    useClippingStore.getState().setClipSectionOrthoActive(false);
-    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
-
-    useAppStore.setState({ sketchModeEnabled: true });
-    engine.setSketchModeFromUI(true);
-    engine.setInspectionBackdropAndLights(true);
-
-    const refsForIsolation = isolationRefs.length > 0 ? isolationRefs : framingRefs;
-    const isolateIdsArr = await engine.resolveIsolationLocalIds(refsForIsolation);
-    const isolateIds = new Set(isolateIdsArr);
-    if (isolateIds.size === 0) {
-      engine.setInspectionBackdropAndLights(false);
-      useAppStore.setState({ sketchModeEnabled: bundle.sketchModeEnabled });
-      engine.setSketchModeFromUI(bundle.sketchModeEnabled);
-      return;
-    }
-
-    const ok = await engine.applyIsolation("isolated", isolateIds, {
-      ...isolationApplyOpts,
-      focus: false,
-      inspectionReadableSketch: true,
-    });
-    if (!ok) {
-      engine.setInspectionBackdropAndLights(false);
-      useAppStore.setState({ sketchModeEnabled: bundle.sketchModeEnabled });
-      engine.setSketchModeFromUI(bundle.sketchModeEnabled);
-      return;
-    }
-    useIsolationStore.getState().setIsolation("isolated", [...isolateIds]);
-
-    engine.beginInspectionVisualizationSession(box);
-    engine.applyInspectionOrthographicView(orthoMode);
-    setOrthographicView(orthoMode);
-    useInspectionStore.getState().enter(part.id, bundle, orthoMode);
-    setActiveSheet("details");
-  }, [
-    engine,
-    analyzerData,
-    loadingState,
-    selectedPart,
-    viewerTool,
-    isolationRefs,
-    isolationApplyOpts,
-    setOrthographicView,
-    setActiveSheet,
-    setViewerTool,
-  ]);
-
-  const handleExitPartInspection = useCallback(async () => {
-    if (!engine) {
-      useInspectionStore.getState().exit();
-      return;
-    }
-    const bundle = useInspectionStore.getState().revert;
-    useInspectionStore.getState().exit();
-
-    engine.discardMeasurementWorkspaceKeepCamera();
-    setViewerTool("none");
-
-    if (!bundle) return;
-
-    engine.setInspectionBackdropAndLights(false);
-    useAppStore.setState({ sketchModeEnabled: bundle.sketchModeEnabled });
-    engine.setSketchModeFromUI(bundle.sketchModeEnabled);
-
-    await engine.clearIsolationVisuals();
-    useIsolationStore.getState().clearIsolation();
-    useViewFilterStore.getState().exitGhostRevealMode();
-    await reapplyViewFilterIfNeeded(engine);
-
-    engine.restoreCameraRevertSnapshot(bundle.camera);
-    if (bundle.camera.orthoMode !== null) {
-      setOrthographicView(bundle.camera.orthoMode);
-    } else {
-      clearViewModeStore();
-    }
-
-    if (bundle.clipping.active && bundle.clipping.direction) {
-      engine.enableClippingDirection(bundle.clipping.direction);
-      engine.setClippingDepthOffset(bundle.clipping.depthOffset);
-      if (bundle.clipping.flipped) engine.flipClipping();
-    }
-    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
-
-    engine.setTransparency(useAppStore.getState().transparencyEnabled);
-  }, [engine, reapplyViewFilterIfNeeded, setOrthographicView, clearViewModeStore, setViewerTool]);
-
-  const handleInspectionOrthoView = useCallback(
-    (mode: ViewModeId) => {
-      engine?.applyInspectionOrthographicView(mode);
-      setOrthographicView(mode);
-      useInspectionStore.getState().setInspectionViewMode(mode);
-    },
-    [engine, setOrthographicView],
-  );
-
   const resolveActiveIsolationLocalIds = useCallback(async () => {
     if (!engine) return new Set<number>();
     const ids = await engine.resolveIsolationLocalIds(isolationRefs);
@@ -807,18 +650,34 @@ export default function ViewerPage() {
     return new Set(useMultiSelectStore.getState().selectedLocalIds);
   }, [engine, isolationRefs]);
 
+  const applyIsolationModeToLocalIds = useCallback(
+    async (
+      mode: "isolated" | "context" | "hidden",
+      ids: Iterable<number>,
+      options?: ApplyIsolationOptions,
+    ) => {
+      if (!engine) return false;
+      const target = new Set(ids);
+      const isolationState = useIsolationStore.getState();
+      if (mode === "hidden" && isolationState.isolationMode === "hidden") {
+        for (const id of isolationState.isolatedFragmentLocalIds) target.add(id);
+      }
+      if (target.size === 0) return false;
+      const ok = await engine.applyIsolation(mode, target, { ...options, focus: false });
+      if (ok) useIsolationStore.getState().setIsolation(mode, [...target]);
+      return ok;
+    },
+    [engine],
+  );
+
   const handleIsolationIsolate = useCallback(async () => {
     if (!engine) return;
     const ids = await resolveActiveIsolationLocalIds();
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("isolated", ids, {
-      ...isolationApplyOpts,
-      focus: false,
-    });
-    if (ok) useIsolationStore.getState().setIsolation("isolated", [...ids]);
-  }, [engine, isolationApplyOpts, resolveActiveIsolationLocalIds]);
+    await applyIsolationModeToLocalIds("isolated", ids, isolationApplyOpts);
+  }, [engine, applyIsolationModeToLocalIds, resolveActiveIsolationLocalIds, isolationApplyOpts]);
 
   const handleIsolationContext = useCallback(async () => {
     if (!engine) return;
@@ -826,12 +685,8 @@ export default function ViewerPage() {
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("context", ids, {
-      ...isolationApplyOpts,
-      focus: false,
-    });
-    if (ok) useIsolationStore.getState().setIsolation("context", [...ids]);
-  }, [engine, isolationApplyOpts, resolveActiveIsolationLocalIds]);
+    await applyIsolationModeToLocalIds("context", ids, isolationApplyOpts);
+  }, [engine, applyIsolationModeToLocalIds, resolveActiveIsolationLocalIds, isolationApplyOpts]);
 
   const handleIsolationHide = useCallback(async () => {
     if (!engine) return;
@@ -839,12 +694,8 @@ export default function ViewerPage() {
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("hidden", ids, {
-      ...isolationApplyOpts,
-      focus: false,
-    });
-    if (ok) useIsolationStore.getState().setIsolation("hidden", [...ids]);
-  }, [engine, isolationApplyOpts, resolveActiveIsolationLocalIds]);
+    await applyIsolationModeToLocalIds("hidden", ids, isolationApplyOpts);
+  }, [engine, applyIsolationModeToLocalIds, resolveActiveIsolationLocalIds, isolationApplyOpts]);
 
   /** Same visual reset as “הצג הכל” — used from בחירה מרובה submenuאיפוס/X without requiring the isolation bar. */
   const restoreFullModelIsolationState = useCallback(async () => {
@@ -873,11 +724,19 @@ export default function ViewerPage() {
       return;
     }
 
-    if (isolationMode !== "none") return;
     setMarkupDrawingEnabled(false);
     useMultiSelectStore.getState().clearSelected();
     useMultiSelectStore.getState().enterMultiSelect();
-    void engine.highlightFragmentLocalSet(new Set());
+    const activeIsolationIds = useIsolationStore.getState().isolatedFragmentLocalIds;
+    if (isolationMode !== "none" && activeIsolationIds.length > 0) {
+      useMultiSelectStore.getState().toggleLocalIds(activeIsolationIds, {
+        key: `active-isolation:${isolationMode}`,
+        weightKg: null,
+      });
+    }
+    if (isolationMode === "none") {
+      void engine.highlightFragmentLocalSet(new Set());
+    }
     setSelectionStatus("בחירה מרובה: לחץ על אלמנטים במודל");
   }, [engine, viewerTool, isolationMode, restoreFullModelIsolationState]);
 
@@ -885,31 +744,22 @@ export default function ViewerPage() {
     if (!engine) return;
     const ids = useMultiSelectStore.getState().selectedLocalIds;
     if (ids.length === 0) return;
-    const ok = await engine.applyIsolation("isolated", new Set(ids), { focus: false });
-    if (ok) {
-      useIsolationStore.getState().setIsolation("isolated", ids);
-    }
-  }, [engine]);
+    await applyIsolationModeToLocalIds("isolated", ids);
+  }, [engine, applyIsolationModeToLocalIds]);
 
   const handleMultiContext = useCallback(async () => {
     if (!engine) return;
     const ids = useMultiSelectStore.getState().selectedLocalIds;
     if (ids.length === 0) return;
-    const ok = await engine.applyIsolation("context", new Set(ids), { focus: false });
-    if (ok) {
-      useIsolationStore.getState().setIsolation("context", ids);
-    }
-  }, [engine]);
+    await applyIsolationModeToLocalIds("context", ids);
+  }, [engine, applyIsolationModeToLocalIds]);
 
   const handleMultiHide = useCallback(async () => {
     if (!engine) return;
     const ids = useMultiSelectStore.getState().selectedLocalIds;
     if (ids.length === 0) return;
-    const ok = await engine.applyIsolation("hidden", new Set(ids), { focus: false });
-    if (ok) {
-      useIsolationStore.getState().setIsolation("hidden", ids);
-    }
-  }, [engine]);
+    await applyIsolationModeToLocalIds("hidden", ids);
+  }, [engine, applyIsolationModeToLocalIds]);
 
   const handleMultiClear = useCallback(async () => {
     await restoreFullModelIsolationState();
@@ -929,7 +779,6 @@ export default function ViewerPage() {
     (event: ReactMouseEvent<HTMLElement>) => {
       if (
         loadingState !== "ready" ||
-        inspectionActive ||
         viewerTool === "measurement" ||
         snapshotSessionOpen ||
         markupDrawingEnabled
@@ -957,11 +806,9 @@ export default function ViewerPage() {
         clientX: event.clientX,
         clientY: event.clientY,
         isolationLocalIds: [...ids],
-        showInspect: false,
       });
     },
     [
-      inspectionActive,
       isolationMode,
       loadingState,
       markupDrawingEnabled,
@@ -975,14 +822,10 @@ export default function ViewerPage() {
       if (!engine) return;
       const idArr = panel.isolationLocalIds;
       if (idArr.length === 0) return;
-      const ok = await engine.applyIsolation("isolated", new Set(idArr), {
-        ...isolationApplyOpts,
-        focus: false,
-      });
-      if (ok) useIsolationStore.getState().setIsolation("isolated", idArr);
+      await applyIsolationModeToLocalIds("isolated", idArr, isolationApplyOpts);
       setElementContextPanel(null);
     },
-    [engine, isolationApplyOpts],
+    [engine, applyIsolationModeToLocalIds, isolationApplyOpts],
   );
 
   const handleElementPanelContext = useCallback(
@@ -990,14 +833,10 @@ export default function ViewerPage() {
       if (!engine) return;
       const idArr = panel.isolationLocalIds;
       if (idArr.length === 0) return;
-      const ok = await engine.applyIsolation("context", new Set(idArr), {
-        ...isolationApplyOpts,
-        focus: false,
-      });
-      if (ok) useIsolationStore.getState().setIsolation("context", idArr);
+      await applyIsolationModeToLocalIds("context", idArr, isolationApplyOpts);
       setElementContextPanel(null);
     },
-    [engine, isolationApplyOpts],
+    [engine, applyIsolationModeToLocalIds, isolationApplyOpts],
   );
 
   const handleElementPanelHide = useCallback(
@@ -1005,20 +844,19 @@ export default function ViewerPage() {
       if (!engine) return;
       const idArr = panel.isolationLocalIds;
       if (idArr.length === 0) return;
-      const ok = await engine.applyIsolation("hidden", new Set(idArr), {
-        ...isolationApplyOpts,
-        focus: false,
-      });
-      if (ok) useIsolationStore.getState().setIsolation("hidden", idArr);
+      await applyIsolationModeToLocalIds("hidden", idArr, isolationApplyOpts);
       setElementContextPanel(null);
     },
-    [engine, isolationApplyOpts],
+    [engine, applyIsolationModeToLocalIds, isolationApplyOpts],
   );
 
-  const handleElementPanelInspect = useCallback(async () => {
-    setElementContextPanel(null);
-    await handleEnterPartInspection();
-  }, [handleEnterPartInspection]);
+  const applySelectionVisuals = useCallback(
+    async (refs: readonly { id: string; expressId: number | null }[]) => {
+      if (!engine) return;
+      await engine.highlightAnalyzerSubset(refs);
+    },
+    [engine],
+  );
 
   const selectAssembly = useCallback(
     async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
@@ -1044,7 +882,7 @@ export default function ViewerPage() {
       setSelectedPartId(null);
       if (!engine) return;
       const refs = analyzerRefsFromAssembly(assembly);
-      await engine.highlightAnalyzerSubset(refs);
+      await applySelectionVisuals(refs);
       if (focusCamera) await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       const partIds = new Set(assembly.parts.map((p) => p.id));
@@ -1053,7 +891,13 @@ export default function ViewerPage() {
         `Assembly: ${assembly.assemblyMark || assembly.name || assembly.id} (${formatCount(partIds.size)} חלקים${boltCount ? `, ${formatCount(boltCount)} ברגים` : ""})`,
       );
     },
-    [engine, setActiveSheet, analyzerData?.assemblies, clearEngineSelectionPreservingViewFilter],
+    [
+      engine,
+      setActiveSheet,
+      analyzerData?.assemblies,
+      clearEngineSelectionPreservingViewFilter,
+      applySelectionVisuals,
+    ],
   );
 
   const selectAggregatedAssemblyRow = useCallback(
@@ -1074,7 +918,7 @@ export default function ViewerPage() {
         refs.push(...analyzerRefsFromAssembly(asm));
       }
 
-      await engine.highlightAnalyzerSubset(refs);
+      await applySelectionVisuals(refs);
       await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       const boltTotal = row.instances.reduce((s, a) => s + (a.bolts?.length ?? 0), 0);
@@ -1086,7 +930,7 @@ export default function ViewerPage() {
           : `Assembly: ${row.displayMark} (${formatCount(partTypes)} חלקים${boltTotal ? `, ${formatCount(boltTotal)} ברגים` : ""})`,
       );
     },
-    [engine, setActiveSheet],
+    [engine, setActiveSheet, applySelectionVisuals],
   );
 
   const selectProfileGroupRow = useCallback(
@@ -1103,12 +947,12 @@ export default function ViewerPage() {
       setSelectedPartId(null);
       if (!engine) return;
       const refs = row.instances.map((p) => ({ id: p.id, expressId: p.expressId }));
-      await engine.highlightAnalyzerSubset(refs);
+      await applySelectionVisuals(refs);
       await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       setSelectionStatus(`פרופיל: ${row.profileLabel} · ${formatCount(row.instances.length)} חלקים`);
     },
-    [engine, setActiveSheet],
+    [engine, setActiveSheet, applySelectionVisuals],
   );
 
   const selectPart = useCallback(
@@ -1132,7 +976,7 @@ export default function ViewerPage() {
         return;
       }
       const refs = [{ id: part.id, expressId: part.expressId }];
-      await engine.highlightAnalyzerSubset(refs);
+      await applySelectionVisuals(refs);
       if (focusCamera) await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       setSelectionStatus(
@@ -1141,7 +985,7 @@ export default function ViewerPage() {
           : `חלק: ${displayPartMark(part as AnalyzerPart)}`,
       );
     },
-    [engine, setActiveSheet, clearEngineSelectionPreservingViewFilter],
+    [engine, setActiveSheet, clearEngineSelectionPreservingViewFilter, applySelectionVisuals],
   );
 
   const selectPartInstances = useCallback(
@@ -1157,7 +1001,7 @@ export default function ViewerPage() {
       setSelectedAssemblyId(null);
       if (!engine) return;
       const refs = instances.map((p) => ({ id: p.id, expressId: p.expressId }));
-      await engine.highlightAnalyzerSubset(refs);
+      await applySelectionVisuals(refs);
       await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       const label = displayPartMark(first);
@@ -1165,7 +1009,7 @@ export default function ViewerPage() {
         instances.length > 1 ? `${label} · ${formatCount(instances.length)} פריטים` : `חלק: ${label}`,
       );
     },
-    [engine, setActiveSheet],
+    [engine, setActiveSheet, applySelectionVisuals],
   );
 
   const clearViewerSelection = useCallback(async () => {
@@ -1212,15 +1056,12 @@ export default function ViewerPage() {
   useEffect(() => {
     if (!engine) return;
     engine.setPickCallback(async (hit) => {
-      if (useIsolationStore.getState().isolationMode !== "none") {
-        return;
-      }
-
       if (!hit) {
         /**
          * Empty-canvas tap: clear normal selections only. In "בחירה מרובה" and Ctrl multi-select,
          * keep the running set so accidental misses don't wipe it; reset is available in the bottom HUD.
          */
+        if (useIsolationStore.getState().isolationMode !== "none") return;
         const multiSelectState = useMultiSelectStore.getState();
         if (
           multiSelectState.pickInteractionMode === "multi" ||
@@ -1229,7 +1070,6 @@ export default function ViewerPage() {
           return;
         }
         if (desktopMultiSelectKeyDownRef.current) return;
-        if (useInspectionStore.getState().active) return;
         await clearViewerSelection();
         return;
       }
@@ -1262,7 +1102,6 @@ export default function ViewerPage() {
               clientX: hit.clientX,
               clientY: hit.clientY,
               isolationLocalIds: [...currentSelectionIds],
-              showInspect: selectedPart != null && !isAnalyzerBoltRow(selectedPart),
             });
             return;
           }
@@ -1281,7 +1120,6 @@ export default function ViewerPage() {
               clientX: hit.clientX,
               clientY: hit.clientY,
               isolationLocalIds: [...selectedIds],
-              showInspect: false,
             });
           }
           return;
@@ -1321,7 +1159,6 @@ export default function ViewerPage() {
             clientX: hit.clientX,
             clientY: hit.clientY,
             isolationLocalIds: [...ids],
-            showInspect: selectedPartMatchesPick && selectedPart != null && !isAnalyzerBoltRow(selectedPart),
           });
           return;
         }
@@ -1334,7 +1171,6 @@ export default function ViewerPage() {
                 clientX: hit.clientX,
                 clientY: hit.clientY,
                 isolationLocalIds: highlightIds,
-                showInspect: false,
               });
             }
           }
@@ -1366,7 +1202,6 @@ export default function ViewerPage() {
                 clientX: hit.clientX,
                 clientY: hit.clientY,
                 isolationLocalIds: [...set],
-                showInspect: false,
               });
             }
             return;
@@ -1383,17 +1218,10 @@ export default function ViewerPage() {
             const ids = await engine.resolveIsolationLocalIds([
               { id: contextPart.id, expressId: contextPart.expressId },
             ]);
-            const showInspect =
-              loadingState === "ready" &&
-              !useInspectionStore.getState().active &&
-              !isAnalyzerBoltRow(contextPart) &&
-              !!contextPart.id &&
-              useIsolationStore.getState().isolationMode === "none";
             setElementContextPanel({
               clientX: hit.clientX,
               clientY: hit.clientY,
               isolationLocalIds: [...ids],
-              showInspect,
             });
           }
           return;
@@ -1409,7 +1237,6 @@ export default function ViewerPage() {
               clientX: hit.clientX,
               clientY: hit.clientY,
               isolationLocalIds: fallback,
-              showInspect: false,
             });
           }
         }
@@ -1423,9 +1250,7 @@ export default function ViewerPage() {
         loadingState === "ready" &&
         viewerTool !== "measurement" &&
         !markupDrawingEnabled &&
-        !snapshotSessionOpen &&
-        useIsolationStore.getState().isolationMode === "none" &&
-        !useInspectionStore.getState().active;
+        !snapshotSessionOpen;
 
       if (
         activePickInteractionMode === "multi" ||
@@ -1645,6 +1470,7 @@ export default function ViewerPage() {
     selectPart,
     setActiveSheet,
     clearViewerSelection,
+    applyIsolationModeToLocalIds,
     loadingState,
     markupDrawingEnabled,
     profileGroupDetail,
@@ -1688,6 +1514,7 @@ export default function ViewerPage() {
     snapshotBlobRef.current = null;
     setSnapshotSessionOpen(false);
     setSnapshotCapturePending(false);
+    setMarkupDrawingEnabled(false);
   }, [clearSnapshotTimers]);
 
   useEffect(() => {
@@ -1705,28 +1532,13 @@ export default function ViewerPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [snapshotSessionOpen, closeSnapshotSession]);
 
-  const startSnapshotSession = useCallback(async () => {
+  const startSnapshotSession = useCallback(() => {
     if (!engine || loadingState !== "ready" || viewerTool === "measurement") return;
     if (snapshotSessionOpen || snapshotCapturePending) return;
     setElementContextPanel(null);
-    const webgl = engine.getViewCanvas();
-    if (!webgl) return;
-
-    setSnapshotCapturePending(true);
-    try {
-      await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      await new Promise<void>((r) => requestAnimationFrame(() => r()));
-
-      const markupCanvas = markupLayerRef.current?.getMarkupCanvas() ?? null;
-      const blob = await compositeViewerSnapshotPngBlob(webgl, markupCanvas);
-      if (!blob) return;
-
-      clearSnapshotTimers();
-      snapshotBlobRef.current = blob;
-      setSnapshotSessionOpen(true);
-    } finally {
-      setSnapshotCapturePending(false);
-    }
+    clearSnapshotTimers();
+    snapshotBlobRef.current = null;
+    setSnapshotSessionOpen(true);
   }, [
     engine,
     loadingState,
@@ -1736,14 +1548,40 @@ export default function ViewerPage() {
     clearSnapshotTimers,
   ]);
 
+  const captureSnapshotBlob = useCallback(async () => {
+    if (!engine || snapshotCapturePending) return null;
+    const webgl = engine.getViewCanvas();
+    if (!webgl) return null;
+
+    setSnapshotCapturePending(true);
+    try {
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+      const markupCanvas = markupLayerRef.current?.getMarkupCanvas() ?? null;
+      const sidePanel = sidePanelSnapshotRef.current;
+      const blob = await compositeViewerSnapshotPngBlob(
+        webgl,
+        markupCanvas,
+        sidePanel ? [sidePanel] : [],
+      );
+      snapshotBlobRef.current = blob;
+      return blob;
+    } finally {
+      setSnapshotCapturePending(false);
+    }
+  }, [engine, snapshotCapturePending]);
+
   const handleSnapshotCopyFromSession = useCallback(async () => {
-    const blob = snapshotBlobRef.current;
+    const blob = await captureSnapshotBlob();
     if (!blob) return;
     clearSnapshotTimers();
     const ok = await copyImageBlobToClipboard(blob);
     snapshotBlobRef.current = null;
     setSnapshotSessionOpen(false);
     setSnapshotCapturePending(false);
+    setMarkupDrawingEnabled(false);
+    setDrawingClearSignal((n) => n + 1);
     if (ok) {
       setSnapshotCopyToast(true);
       snapshotCopyTimerRef.current = setTimeout(() => {
@@ -1751,10 +1589,10 @@ export default function ViewerPage() {
         setSnapshotCopyToast(false);
       }, 2500);
     }
-  }, [clearSnapshotTimers]);
+  }, [captureSnapshotBlob, clearSnapshotTimers]);
 
-  const handleSnapshotDownloadFromSession = useCallback(() => {
-    const blob = snapshotBlobRef.current;
+  const handleSnapshotDownloadFromSession = useCallback(async () => {
+    const blob = await captureSnapshotBlob();
     if (!blob) return;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1766,7 +1604,8 @@ export default function ViewerPage() {
     a.remove();
     URL.revokeObjectURL(url);
     closeSnapshotSession();
-  }, [closeSnapshotSession]);
+    setDrawingClearSignal((n) => n + 1);
+  }, [captureSnapshotBlob, closeSnapshotSession]);
 
   const handleDockSelectionMode = useCallback((m: SelectionMode) => {
     setSelectionMode(m);
@@ -1780,7 +1619,7 @@ export default function ViewerPage() {
     );
   }, []);
 
-  const showDataPanel = activeSheet === "details" && !inspectionActive;
+  const showDataPanel = activeSheet === "details";
   const showFilterPanel = activeSheet === "filter";
 
   return (
@@ -1796,12 +1635,13 @@ export default function ViewerPage() {
           ref={markupLayerRef}
           active={markupDrawingEnabled}
           clearSignal={drawingClearSignal}
+          elevated={snapshotSessionOpen}
         />
       )}
 
       {snapshotSessionOpen ? (
         <div
-          className="pointer-events-auto fixed inset-0 z-[45] bg-zinc-950/45 backdrop-blur-[0.5px]"
+          className="pointer-events-auto fixed inset-0 z-[45] bg-transparent"
           aria-modal="true"
           role="dialog"
           aria-label="מצב צילום מסך — בחר העתקה, הורדה או סגירה בתפריט התחתון"
@@ -1824,7 +1664,7 @@ export default function ViewerPage() {
           <span dir="rtl">חזרה</span>
         </Button>
 
-        {!inspectionActive && multiSelectedCount > 0 ? (
+        {multiSelectedCount > 0 ? (
           <div
             className="pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 text-xs font-medium text-zinc-700"
             dir="rtl"
@@ -1850,8 +1690,7 @@ export default function ViewerPage() {
         {loadingState === "error" ? "שגיאה בטעינת IFC" : ""}
       </div>
 
-      {!inspectionActive &&
-        elementContextPanel &&
+      {elementContextPanel &&
         !snapshotSessionOpen &&
         viewerTool !== "measurement" &&
         pickInteractionMode !== "multi" &&
@@ -1861,37 +1700,14 @@ export default function ViewerPage() {
             onIsolate={() => void handleElementPanelIsolate(elementContextPanel)}
             onContext={() => void handleElementPanelContext(elementContextPanel)}
             onHide={() => void handleElementPanelHide(elementContextPanel)}
-            onInspect={() => void handleElementPanelInspect()}
           />
         )}
 
-      {inspectionActive && inspectionPartResolved && analyzerData && (
-        <InspectionPanel
-          part={inspectionPartResolved}
-          allSteelParts={steelPartsAll}
-          assemblyLabel={inspectionAssemblyLabel}
-          onClose={() => void handleExitPartInspection()}
-        />
-      )}
-
-      {inspectionActive && (
-        <InspectionModeToolbar
-          activeViewMode={inspectionViewMode}
-          measurementActive={viewerTool === "measurement"}
-          sketchActive={sketchModeEnabled}
-          onExit={() => void handleExitPartInspection()}
-          onMeasurementToggle={toggleMeasurementTool}
-          onApplyViewMode={handleInspectionOrthoView}
-          onSketchToggle={handleSketchToggle}
-        />
-      )}
-
-      {!inspectionActive && (
       <ViewerBottomDock
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
         onDashboard={toggleDashboardSheet}
-        dashboardSheetOpen={activeSheet === "details" && !inspectionActive}
+        dashboardSheetOpen={activeSheet === "details"}
         onViewFilter={
           loadingState === "ready" && analyzerData ? toggleFilterSheet : undefined
         }
@@ -1904,24 +1720,18 @@ export default function ViewerPage() {
           loadingState === "ready" && analyzerData ? () => setGlobalSearchOpen(true) : undefined
         }
         onSnapshot={
-          loadingState === "ready" && !inspectionActive
-            ? () => void startSnapshotSession()
-            : undefined
+          loadingState === "ready" ? () => void startSnapshotSession() : undefined
         }
         snapshotSessionOpen={snapshotSessionOpen}
         snapshotCapturePending={snapshotCapturePending}
         onSnapshotCopy={
-          loadingState === "ready" && !inspectionActive
-            ? () => void handleSnapshotCopyFromSession()
-            : undefined
+          loadingState === "ready" ? () => void handleSnapshotCopyFromSession() : undefined
         }
         onSnapshotDownload={
-          loadingState === "ready" && !inspectionActive
-            ? handleSnapshotDownloadFromSession
-            : undefined
+          loadingState === "ready" ? handleSnapshotDownloadFromSession : undefined
         }
         onSnapshotDismiss={
-          loadingState === "ready" && !inspectionActive ? closeSnapshotSession : undefined
+          loadingState === "ready" ? closeSnapshotSession : undefined
         }
         onResetView={loadingState === "ready" ? handleResetView : undefined}
         measurementActive={viewerTool === "measurement"}
@@ -1964,9 +1774,8 @@ export default function ViewerPage() {
           viewerTool === "measurement" ||
           markupDrawingEnabled
         }
-        multiSelectIsolationBlocksEnter={isolationMode !== "none"}
+        multiSelectIsolationBlocksEnter={false}
         multiSelectHud={
-          !inspectionActive &&
           pickInteractionMode === "multi" &&
           loadingState === "ready"
             ? {
@@ -1981,7 +1790,6 @@ export default function ViewerPage() {
             : undefined
         }
         elementIsolationHud={
-          !inspectionActive &&
           pickInteractionMode !== "multi" &&
           isolationMode !== "none" &&
           loadingState === "ready" &&
@@ -2007,7 +1815,6 @@ export default function ViewerPage() {
           loadingState === "ready" ? handleMarkupDrawingClear : undefined
         }
       />
-      )}
 
 
       {analyzerData && (
@@ -2024,7 +1831,10 @@ export default function ViewerPage() {
       )}
 
       {showFilterPanel && (
-        <div className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}>
+        <div
+          ref={sidePanelSnapshotRef}
+          className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}
+        >
           <aside
             className={VIEWER_SIDE_PANEL_CHROME}
             dir="rtl"
@@ -2039,7 +1849,10 @@ export default function ViewerPage() {
       )}
 
       {showDataPanel && (
-        <div className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}>
+        <div
+          ref={sidePanelSnapshotRef}
+          className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}
+        >
           <aside
             className={VIEWER_SIDE_PANEL_CHROME}
             dir="rtl"
@@ -2115,7 +1928,6 @@ export default function ViewerPage() {
               <PartPickDetailPanel
                 entity={selectedPart}
                 allSteelParts={steelPartsAll}
-                onBackToList={() => void selectPart(null)}
               />
             ) : profileGroupDetail ? (
               <ProfileGroupPickDetailPanel
