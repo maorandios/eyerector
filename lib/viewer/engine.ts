@@ -172,6 +172,25 @@ export type ProductionHoleOverlayInput = {
    * geometry even when analyzer→fragment steel GUID mapping misses the member.
    */
   isolationSteelLocalIds?: readonly number[];
+  /**
+   * חלק (single-part) ייצור scope.
+   *
+   * When set, {@link visibleSteelPartIds} / {@link visibleSteelRefs} continue to describe the
+   * **full אסמבלי context** (so the overlay's picker chooses each disc's natural face exactly
+   * the way אסמבלי mode does — plate disc on the plate, beam disc on the beam, etc.), and this
+   * field lists the **single חלק the user is actually fabricating** so the overlay keeps only
+   * the discs that land on it. Drops, by construction:
+   *   – plate-mounted bolts whose natural disc sits on the (hidden) plate, and
+   *   – any other joint mate whose disc would otherwise float in the hidden region.
+   *
+   * Unset / empty in אסמבלי mode: no filter, every assembly-mate disc shows.
+   */
+  productionDisplayedSteelRefs?: readonly { id: string; expressId: number | null }[];
+  /**
+   * @deprecated Kept on the type for backwards-compatible callers; superseded by
+   * {@link productionDisplayedSteelRefs}. New code should populate the refs field instead.
+   */
+  productionStrictPartScope?: boolean;
 };
 
 export type ViewerToolMode = "none" | "measurement" | "flash";
@@ -277,110 +296,51 @@ function clusterFastenerSamplesByCollinearity(
 }
 
 /**
- * Distance from a world-space point to the **surface** of an axis-aligned box.
- * (Unlike {@link THREE.Box3#clampPoint} distance, interior points get the depth to the nearest face,
- * not zero — I-beam voids no longer make every nut sample “distance 0” from the hull.)
+ * Slab-method line/AABB intersection.
+ *
+ * Returns `[tMin, tMax]` parameter range along `origin + t * dir` that lies inside `box`, or
+ * `null` if the line misses entirely. Both `origin` and `box` must be in the **same coordinate
+ * frame**. `dir` does not need to be unit (the t values scale accordingly).
+ *
+ * Used by ייצור disc placement to find where each bolt's axis enters and exits each visible
+ * per-member AABB — one disc is drawn at every entry and every exit on every visible part the
+ * bolt's line crosses. A bolt whose line misses every visible part places zero discs and the
+ * bolt mesh is hidden by the caller.
  */
-function distancePointWorldToAabbSurface(box: THREE.Box3, pointWorld: THREE.Vector3): number {
-  const clamped = new THREE.Vector3();
-  box.clampPoint(pointWorld, clamped);
-  const d = pointWorld.distanceTo(clamped);
-  if (d > 1e-9) return d;
-  const { min, max } = box;
-  return Math.min(
-    pointWorld.x - min.x,
-    max.x - pointWorld.x,
-    pointWorld.y - min.y,
-    max.y - pointWorld.y,
-    pointWorld.z - min.z,
-    max.z - pointWorld.z,
-  );
-}
-
-/**
- * Distance from a world-space point to the **closest** surface across a list of per-member AABBs,
- * with a fallback to a single union AABB. Per-member boxes are critical for column assemblies
- * where a wider base plate inflates the union → column-flange bolts otherwise sit "deep inside"
- * the union and are wrongly rejected.
- */
-function distancePointWorldToClosestPartSurface(
-  perPartBoxes: readonly THREE.Box3[] | null,
-  unionBox: THREE.Box3 | null,
-  pointWorld: THREE.Vector3,
-): number {
-  if (perPartBoxes && perPartBoxes.length > 0) {
-    let best = Infinity;
-    for (const box of perPartBoxes) {
-      if (!box || box.isEmpty()) continue;
-      const d = distancePointWorldToAabbSurface(box, pointWorld);
-      if (d < best) best = d;
+function lineIntersectsAabb(
+  origin: THREE.Vector3,
+  dir: THREE.Vector3,
+  box: THREE.Box3,
+): [number, number] | null {
+  const EPS = 1e-9;
+  let tMin = -Infinity;
+  let tMax = Infinity;
+  const min = box.min;
+  const max = box.max;
+  for (let i = 0; i < 3; i++) {
+    const o = i === 0 ? origin.x : i === 1 ? origin.y : origin.z;
+    const d = i === 0 ? dir.x : i === 1 ? dir.y : dir.z;
+    const lo = i === 0 ? min.x : i === 1 ? min.y : min.z;
+    const hi = i === 0 ? max.x : i === 1 ? max.y : max.z;
+    if (Math.abs(d) < EPS) {
+      /** Line parallel to this slab — has to be between the planes to ever intersect. */
+      if (o < lo || o > hi) return null;
+      continue;
     }
-    if (Number.isFinite(best)) return best;
-  }
-  if (unionBox && !unionBox.isEmpty()) {
-    return distancePointWorldToAabbSurface(unionBox, pointWorld);
-  }
-  return Number.POSITIVE_INFINITY;
-}
-
-/**
- * Pick one hole reference per physical fastener cluster: sample with minimum distance to the steel
- * **skin** (closest member AABB surface), so top-flange heads win over cavity nuts; interior void
- * tie-breaking is gone.
- */
-function pickHoleLikeSampleForCluster(
-  cluster: ProductionSampleCandidate[],
-  steelPerPartBoxesWorld: readonly THREE.Box3[] | null,
-  steelUnionWorld: THREE.Box3 | null,
-  modelObject: THREE.Object3D,
-  tmpWorld: THREE.Vector3,
-): ProductionSampleCandidate {
-  if (cluster.length === 1) return cluster[0];
-  const hasAnySteel =
-    (steelPerPartBoxesWorld && steelPerPartBoxesWorld.length > 0) ||
-    (steelUnionWorld && !steelUnionWorld.isEmpty());
-  if (hasAnySteel) {
-    let best = cluster[0];
-    let bestD = Infinity;
-    for (const c of cluster) {
-      tmpWorld.copy(c.pos).applyMatrix4(modelObject.matrixWorld);
-      const d = distancePointWorldToClosestPartSurface(
-        steelPerPartBoxesWorld ?? null,
-        steelUnionWorld,
-        tmpWorld,
-      );
-      if (d < bestD) {
-        bestD = d;
-        best = c;
-      }
+    const inv = 1 / d;
+    let t1 = (lo - o) * inv;
+    let t2 = (hi - o) * inv;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
     }
-    return best;
+    if (t1 > tMin) tMin = t1;
+    if (t2 < tMax) tMax = t2;
+    if (tMin > tMax) return null;
   }
-  const axis = cluster[0].axis;
-  const bx = cluster[0].pos.x;
-  const by = cluster[0].pos.y;
-  const bz = cluster[0].pos.z;
-  let tMin = Infinity;
-  let tMax = -Infinity;
-  const tArr: number[] = new Array(cluster.length);
-  for (let k = 0; k < cluster.length; k++) {
-    const p = cluster[k].pos;
-    const t = (p.x - bx) * axis.x + (p.y - by) * axis.y + (p.z - bz) * axis.z;
-    tArr[k] = t;
-    tMin = Math.min(tMin, t);
-    tMax = Math.max(tMax, t);
-  }
-  const target = (tMin + tMax) / 2;
-  let best = cluster[0];
-  let bestErr = Infinity;
-  for (let k = 0; k < cluster.length; k++) {
-    const err = Math.abs(tArr[k] - target);
-    if (err < bestErr) {
-      bestErr = err;
-      best = cluster[k];
-    }
-  }
-  return best;
+  if (!Number.isFinite(tMin) || !Number.isFinite(tMax)) return null;
+  return [tMin, tMax];
 }
 
 export class ViewerEngine {
@@ -2965,6 +2925,14 @@ export class ViewerEngine {
       if (!bk) continue;
       if (!boltKeyToRawGuid.has(bk)) boltKeyToRawGuid.set(bk, link.boltGlobalId.trim());
     }
+    /**
+     * {@link overlayBoltRows} carries hyperedge reach plus every bolt on any assembly that
+     * contains a visible part. Tekla often writes `boltSteelLinks` rows for only one side of
+     * a joint (the "main" member), so a bolt that physically pierces the visible beam may be
+     * linked only to the connected plate. Without this expansion חלק mode would miss those
+     * bolts entirely. The strict per‑part scope filter in {@link showProductionHoleOverlays}
+     * then drops bolts whose bbox does not volumetrically pierce the displayed part.
+     */
     for (const b of input.overlayBoltRows ?? []) {
       const bk = normalizeIfcGuidKey(b.id) ?? b.id.trim();
       if (!bk) continue;
@@ -3243,84 +3211,6 @@ export class ViewerEngine {
         resolvedForDiscs = resolved;
       }
 
-      const tmpPosition = new THREE.Vector3();
-      const tmpMatrix = new THREE.Matrix4();
-      const componentBoxesFromMeshData = (mesh: MeshData): THREE.Box3[] => {
-        if (!mesh.positions || mesh.positions.length < 9) return [];
-        const positions = mesh.positions;
-        const vertexCount = Math.floor(positions.length / 3);
-        const parent = new Int32Array(vertexCount);
-        for (let i = 0; i < vertexCount; i++) parent[i] = i;
-        const find = (i: number): number => {
-          let root = i;
-          while (parent[root] !== root) root = parent[root];
-          while (parent[i] !== i) {
-            const next = parent[i];
-            parent[i] = root;
-            i = next;
-          }
-          return root;
-        };
-        const union = (a: number, b: number) => {
-          const ra = find(a);
-          const rb = find(b);
-          if (ra !== rb) parent[rb] = ra;
-        };
-
-        const connectTriangle = (a: number, b: number, c: number) => {
-          if (a < vertexCount && b < vertexCount && c < vertexCount) {
-            union(a, b);
-            union(b, c);
-          }
-        };
-
-        if (mesh.indices && mesh.indices.length >= 3) {
-          for (let i = 0; i + 2 < mesh.indices.length; i += 3) {
-            connectTriangle(mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]);
-          }
-        } else {
-          for (let i = 0; i + 2 < vertexCount; i += 3) {
-            connectTriangle(i, i + 1, i + 2);
-          }
-        }
-
-        /** Non-indexed geometry often duplicates vertices per face; reconnect by shared position. */
-        const firstVertexByPosition = new Map<string, number>();
-        for (let i = 0; i < vertexCount; i++) {
-          const key = `${positions[i * 3].toFixed(5)},${positions[i * 3 + 1].toFixed(5)},${positions[
-            i * 3 + 2
-          ].toFixed(5)}`;
-          const prev = firstVertexByPosition.get(key);
-          if (prev == null) {
-            firstVertexByPosition.set(key, i);
-          } else {
-            union(prev, i);
-          }
-        }
-
-        const matrix =
-          mesh.transform instanceof THREE.Matrix4
-            ? mesh.transform
-            : Array.isArray(mesh.transform)
-              ? tmpMatrix.fromArray(mesh.transform)
-              : ArrayBuffer.isView(mesh.transform)
-                ? tmpMatrix.fromArray(Array.from(mesh.transform as ArrayLike<number>))
-                : null;
-        const boxes = new Map<number, THREE.Box3>();
-        for (let i = 0; i < vertexCount; i++) {
-          const root = find(i);
-          let box = boxes.get(root);
-          if (!box) {
-            box = new THREE.Box3();
-            boxes.set(root, box);
-          }
-          tmpPosition.fromArray(positions, i * 3);
-          if (matrix) tmpPosition.applyMatrix4(matrix);
-          box.expandByPoint(tmpPosition);
-        }
-        return [...boxes.values()].filter((box) => !box.isEmpty());
-      };
-
       const fetchFallbackBoxForLocal = async (localId: number): Promise<THREE.Box3 | null> => {
         try {
           const arr = await fragments.getBBoxes({ [this.modelId!]: new Set([localId]) });
@@ -3335,7 +3225,6 @@ export class ViewerEngine {
       group.name = "production-hole-overlays";
 
       const zNormal = new THREE.Vector3(0, 0, 1);
-      const axisDir = new THREE.Vector3();
       const quat = new THREE.Quaternion();
       const size = new THREE.Vector3();
       const center = new THREE.Vector3();
@@ -3362,7 +3251,7 @@ export class ViewerEngine {
         (steelRefBoxWorld != null && !steelRefBoxWorld.isEmpty());
 
       /**
-       * Disc must land **on or inside** a visible per‑member box (per‑member, not the union).
+       * Disc must land **on or inside** a visible per-member box (per-member, not the union).
        * No snapping / projection: a Tekla "hole only" fastener whose sample sits between the
        * displayed plate and a hidden plate underneath has the disc fall in the gap — refusing
        * to draw is intentional, since projecting it onto the visible face would re-introduce
@@ -3423,172 +3312,8 @@ export class ViewerEngine {
         return true;
       };
 
-      /** All scene meshes carrying a fragment `tileId` (ThatOpen may attach more than one per tile in edge cases). */
-      const tileMeshesById = new Map<number, THREE.Mesh[]>();
-      this.modelObject.traverse((obj) => {
-        const mesh = obj as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        const tileId = (mesh.userData as Record<string, unknown>).tileId;
-        if (typeof tileId !== "number") return;
-        const list = tileMeshesById.get(tileId) ?? [];
-        if (!list.includes(mesh)) list.push(mesh);
-        tileMeshesById.set(tileId, list);
-      });
       this.modelObject.updateWorldMatrix(true, true);
       const modelWorldInverse = new THREE.Matrix4().copy(this.modelObject.matrixWorld).invert();
-      const vertex = new THREE.Vector3();
-      const worldVertexFromAttribute = (
-        attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-        vertexIndex: number,
-        matrixWorld: THREE.Matrix4,
-      ): THREE.Vector3 | null => {
-        try {
-          if (vertexIndex < 0 || vertexIndex >= attribute.count) return null;
-          vertex.fromBufferAttribute(attribute, vertexIndex);
-          if (!Number.isFinite(vertex.x) || !Number.isFinite(vertex.y) || !Number.isFinite(vertex.z)) {
-            return null;
-          }
-          vertex.applyMatrix4(matrixWorld).applyMatrix4(modelWorldInverse);
-          return vertex.clone();
-        } catch {
-          /** Some live tile chunks can point at transient/virtual geometry buffers; skip them. */
-          return null;
-        }
-      };
-      const componentBoxesFromLiveTileRange = (
-        pos: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-        indexArray: ArrayLike<number> | null,
-        start: number,
-        count: number,
-        matrixWorld: THREE.Matrix4,
-      ): THREE.Box3[] => {
-        const end = start + count;
-        const nodeByVertexIndex = new Map<number, number>();
-        const points: THREE.Vector3[] = [];
-        const parent: number[] = [];
-        const find = (i: number): number => {
-          let root = i;
-          while (parent[root] !== root) root = parent[root];
-          while (parent[i] !== i) {
-            const next = parent[i];
-            parent[i] = root;
-            i = next;
-          }
-          return root;
-        };
-        const union = (a: number, b: number) => {
-          const ra = find(a);
-          const rb = find(b);
-          if (ra !== rb) parent[rb] = ra;
-        };
-        const getNode = (vertexIndex: number): number | null => {
-          if (vertexIndex < 0 || vertexIndex >= pos.count) return null;
-          const existing = nodeByVertexIndex.get(vertexIndex);
-          if (existing != null) return existing;
-          const p = worldVertexFromAttribute(pos, vertexIndex, matrixWorld);
-          if (!p) return null;
-          const node = points.length;
-          points.push(p);
-          parent.push(node);
-          nodeByVertexIndex.set(vertexIndex, node);
-          return node;
-        };
-        const connectTriangle = (a: number, b: number, c: number) => {
-          const na = getNode(a);
-          const nb = getNode(b);
-          const nc = getNode(c);
-          if (na == null || nb == null || nc == null) return;
-          union(na, nb);
-          union(nb, nc);
-        };
-
-        if (indexArray) {
-          const safeEnd = Math.min(end, indexArray.length);
-          for (let n = start; n + 2 < safeEnd; n += 3) {
-            connectTriangle(indexArray[n], indexArray[n + 1], indexArray[n + 2]);
-          }
-        } else {
-          const safeEnd = Math.min(end, pos.count);
-          for (let n = start; n + 2 < safeEnd; n += 3) {
-            connectTriangle(n, n + 1, n + 2);
-          }
-        }
-
-        /** Reconnect duplicated, non-indexed face vertices by identical transformed position. */
-        const byPosition = new Map<string, number>();
-        for (let i = 0; i < points.length; i++) {
-          const p = points[i];
-          const key = `${p.x.toFixed(5)},${p.y.toFixed(5)},${p.z.toFixed(5)}`;
-          const prev = byPosition.get(key);
-          if (prev == null) byPosition.set(key, i);
-          else union(prev, i);
-        }
-
-        const boxes = new Map<number, THREE.Box3>();
-        for (let i = 0; i < points.length; i++) {
-          const root = find(i);
-          let box = boxes.get(root);
-          if (!box) {
-            box = new THREE.Box3();
-            boxes.set(root, box);
-          }
-          box.expandByPoint(points[i]);
-        }
-        return [...boxes.values()].filter((box) => !box.isEmpty());
-      };
-
-      const instanceLocal = new THREE.Matrix4();
-      const effectiveWorldMatrix = new THREE.Matrix4();
-      const forEachEffectiveWorldMatrix = (mesh: THREE.Mesh, fn: (world: THREE.Matrix4) => void) => {
-        mesh.updateWorldMatrix(true, false);
-        if ((mesh as THREE.Mesh & THREE.InstancedMesh).isInstancedMesh) {
-          const im = mesh as THREE.InstancedMesh;
-          for (let i = 0; i < im.count; i++) {
-            im.getMatrixAt(i, instanceLocal);
-            effectiveWorldMatrix.multiplyMatrices(mesh.matrixWorld, instanceLocal);
-            fn(effectiveWorldMatrix);
-          }
-          return;
-        }
-        fn(mesh.matrixWorld);
-      };
-
-      const chunkBoxesFromLiveTiles = async (localId: number): Promise<THREE.Box3[]> => {
-        const out: THREE.Box3[] = [];
-        let chunks: { tileId: number; position: Uint32Array; size: Uint32Array }[];
-        try {
-          chunks = await fragModel.getItemDrawChunks([localId]);
-        } catch {
-          return out;
-        }
-        for (const chunk of chunks) {
-          const meshes = tileMeshesById.get(chunk.tileId) ?? [];
-          for (const mesh of meshes) {
-            if (!mesh.geometry) continue;
-            const pos = mesh.geometry.getAttribute("position");
-            if (!pos) continue;
-            const index = mesh.geometry.index;
-            for (let i = 0; i < chunk.position.length; i++) {
-              const start = chunk.position[i];
-              const count = chunk.size[i];
-              if (!Number.isFinite(start) || !Number.isFinite(count) || count === 0) continue;
-              const indexArray = index?.array;
-              if (index && indexArray) {
-                if (start >= indexArray.length) continue;
-                forEachEffectiveWorldMatrix(mesh, (world) => {
-                  out.push(...componentBoxesFromLiveTileRange(pos, indexArray, start, count, world));
-                });
-              } else {
-                if (start >= pos.count) continue;
-                forEachEffectiveWorldMatrix(mesh, (world) => {
-                  out.push(...componentBoxesFromLiveTileRange(pos, null, start, count, world));
-                });
-              }
-            }
-          }
-        }
-        return out;
-      };
 
       const matrix4FromIfcAxisPlacement = (t: {
         position: number[];
@@ -3623,7 +3348,64 @@ export class ViewerEngine {
       const samplePos = new THREE.Vector3();
       const sampleAxis = new THREE.Vector3();
 
-      const steelPickWorld = new THREE.Vector3();
+      /**
+       * Place red hole discs where a bolt's axis line **enters and exits** each visible per-member
+       * AABB. The bolt's line is `posLocal + t * axisLocal` in model-local coords; for every visible
+       * part box (world coords) we slab-test the line for `[tMin, tMax]` and drop one disc at each
+       * crossing — `tMin` = entry face, `tMax` = exit face. A bolt whose line misses every visible
+       * part returns `0`, and the caller hides the bolt mesh so חלק mode is left with discs only.
+       *
+       * This is the post-revert disc placement contract: bolt selection (in
+       * {@link buildProductionBoltAllowlistPayload}) decides **which** bolts belong to the view, and
+       * this function decides **where** their discs sit by purely geometric AABB intersection — no
+       * sample picking, no IFC link graph, no centroid heuristics. Secondary-part bolts get discs
+       * automatically since their axis still crosses the visible part's AABB.
+       */
+      const placeAxisAabbIntersectionDiscs = (
+        posLocal: THREE.Vector3,
+        axisLocal: THREE.Vector3,
+        holeRadius: number,
+        dedupePrefix: string,
+      ): number => {
+        if (steelPerPartBoxesWorld.length === 0 || axisLocal.lengthSq() < 1e-12) return 0;
+        const posWorld = posLocal.clone().applyMatrix4(this.modelObject!.matrixWorld);
+        const axisWorld = axisLocal.clone().transformDirection(this.modelObject!.matrixWorld);
+        if (axisWorld.lengthSq() < 1e-12) return 0;
+        axisWorld.normalize();
+
+        let placed = 0;
+        for (let bi = 0; bi < steelPerPartBoxesWorld.length; bi++) {
+          const box = steelPerPartBoxesWorld[bi];
+          if (!box || box.isEmpty()) continue;
+          const t = lineIntersectsAabb(posWorld, axisWorld, box);
+          if (!t) continue;
+          const [tMin, tMax] = t;
+
+          const entryWorld = new THREE.Vector3(
+            posWorld.x + tMin * axisWorld.x,
+            posWorld.y + tMin * axisWorld.y,
+            posWorld.z + tMin * axisWorld.z,
+          );
+          const entryLocal = entryWorld.clone().applyMatrix4(modelWorldInverse);
+          if (addMarkerDisc(entryLocal, axisLocal, holeRadius, `${dedupePrefix}:box${bi}:entry`)) {
+            placed++;
+          }
+
+          /** Tangent (single-point) intersection — entry == exit, skip the second disc. */
+          if (tMax - tMin > 1e-4) {
+            const exitWorld = new THREE.Vector3(
+              posWorld.x + tMax * axisWorld.x,
+              posWorld.y + tMax * axisWorld.y,
+              posWorld.z + tMax * axisWorld.z,
+            );
+            const exitLocal = exitWorld.clone().applyMatrix4(modelWorldInverse);
+            if (addMarkerDisc(exitLocal, axisLocal, holeRadius, `${dedupePrefix}:box${bi}:exit`)) {
+              placed++;
+            }
+          }
+        }
+        return placed;
+      };
 
       /**
        * Pre‑fetch each resolved bolt's world AABB so we can run a centroid test after disc
@@ -3671,19 +3453,19 @@ export class ViewerEngine {
             ? Math.max(work.row.boltHoleDiameterMm, 1) / 1000
             : null;
 
-        /**
-         * Tekla / IFC bolt patterns are usually **one localId** with many fragment **samples**
-         * (global × local placement per physical bolt). Mesh connectivity / draw chunks alone
-         * collapse those into one bbox — use element snap data for per-instance origins.
-         *
-         * Exporters also emit **several samples along one bolt** (head, shank, nut meshes). Those
-         * are collinear — cluster them and keep **one** ring at the hole mouth (closest to steel).
-         */
+        const holeRadius = diameterM != null ? Math.max(diameterM / 2, 0.004) : 0.012;
         let placedForBolt = 0;
+
+        /**
+         * Path 1 — IFC sample placements. Tekla / IFC bolt patterns are typically one `localId`
+         * with many fragment **samples** (global × local placement per physical bolt). Each
+         * physical bolt's samples are collinear (head + shank + nut share an axis); we cluster
+         * by collinearity, then for every cluster intersect its axis line with each visible
+         * per-member AABB. The line `meanPos + t * clusterAxis` is the bolt's centreline; entry
+         * + exit on each AABB give one disc per visible face the bolt pierces.
+         */
         try {
           const elements = await fragModel._getElements([work.localId]);
-          const holeRadius =
-            diameterM != null ? Math.max(diameterM / 2, 0.004) : 0.012;
           const sampleCandidates: ProductionSampleCandidate[] = [];
           for (const el of elements) {
             const core = el.core;
@@ -3717,239 +3499,68 @@ export class ViewerEngine {
           );
           for (let ci = 0; ci < clusters.length; ci++) {
             const cl = clusters[ci]!;
-            const pick = pickHoleLikeSampleForCluster(
-              cl,
-              steelPerPartBoxesWorld,
-              steelRefBoxWorld,
-              this.modelObject,
-              steelPickWorld,
+            if (cl.length === 0) continue;
+            /** Mean position is on the axis line for any collinear cluster; cluster axis is unit-length. */
+            const meanPos = new THREE.Vector3();
+            for (const c of cl) meanPos.add(c.pos);
+            meanPos.divideScalar(cl.length);
+            const clusterAxis = cl[0]!.axis.clone();
+            placedForBolt += placeAxisAabbIntersectionDiscs(
+              meanPos,
+              clusterAxis,
+              holeRadius,
+              `${work.boltKey}:cluster:${ci}`,
             );
-            if (addMarkerDisc(pick.pos, pick.axis, holeRadius, `${work.boltKey}:sample:${ci}`)) {
-              placedForBolt++;
-            }
           }
         } catch {
-          /* geometry fallback below */
-        }
-
-        if (placedForBolt > 0) {
-          continue;
-        }
-
-        let candidateBoxes: THREE.Box3[] = await chunkBoxesFromLiveTiles(work.localId);
-        try {
-          if (candidateBoxes.length === 0) {
-            const itemGeometry = await fragModel.getItemsGeometry([work.localId], FRAGMENTS_LOD_GEOMETRY);
-            const chunks = itemGeometry[0] ?? [];
-            for (const chunk of chunks) candidateBoxes.push(...componentBoxesFromMeshData(chunk));
-          }
-        } catch {
-          candidateBoxes = [];
-        }
-        if (candidateBoxes.length === 0) {
-          const fallback = await fetchFallbackBoxForLocal(work.localId);
-          if (fallback) candidateBoxes = [fallback];
-        }
-
-        type ProductionBoltComponent = {
-          box: THREE.Box3;
-          center: THREE.Vector3;
-          axis: number;
-          longLen: number;
-          midLen: number;
-          score: number;
-        };
-
-        const strictBoltComponents = (boxes: readonly THREE.Box3[]): ProductionBoltComponent[] => {
-          const out: ProductionBoltComponent[] = [];
-          for (const box of boxes) {
-            if (!(box instanceof THREE.Box3) || box.isEmpty()) continue;
-
-            box.getSize(size);
-            box.getCenter(center);
-
-            const dimensions = [size.x, size.y, size.z].sort((a, b) => a - b);
-            const shortLen = dimensions[0];
-            const midLen = dimensions[1];
-            const maxLen = dimensions[2];
-            if (maxLen < 1e-6 || shortLen < 1e-6 || midLen < 1e-6) continue;
-
-            let longAxis = 0;
-            let longLen = size.x;
-            if (size.y > longLen) {
-              longLen = size.y;
-              longAxis = 1;
-            }
-            if (size.z > longLen) {
-              longLen = size.z;
-              longAxis = 2;
-            }
-
-            const aspect = maxLen / Math.max(midLen, 1e-6);
-            const nearExpectedDiameter =
-              diameterM == null ||
-              (midLen >= diameterM * 0.18 && midLen <= diameterM * 2.6) ||
-              (shortLen >= diameterM * 0.18 && shortLen <= diameterM * 2.6);
-            if (aspect < 1.25 && !nearExpectedDiameter) continue;
-
-            out.push({
-              box: box.clone(),
-              center: center.clone(),
-              axis: longAxis,
-              longLen,
-              midLen,
-              score: aspect + (nearExpectedDiameter ? 2 : 0),
-            });
-          }
-          return out;
-        };
-
-        const relaxedBoltComponents = (boxes: readonly THREE.Box3[]): ProductionBoltComponent[] => {
-          const out: ProductionBoltComponent[] = [];
-          for (const box of boxes) {
-            if (!(box instanceof THREE.Box3) || box.isEmpty()) continue;
-
-            box.getSize(size);
-            box.getCenter(center);
-
-            const dimensions = [size.x, size.y, size.z].sort((a, b) => a - b);
-            const shortLen = dimensions[0];
-            const midLen = dimensions[1];
-            const maxLen = dimensions[2];
-            if (maxLen < 1e-6 || shortLen < 1e-6 || midLen < 1e-6) continue;
-
-            let longAxis = 0;
-            let longLen = size.x;
-            if (size.y > longLen) {
-              longLen = size.y;
-              longAxis = 1;
-            }
-            if (size.z > longLen) {
-              longLen = size.z;
-              longAxis = 2;
-            }
-
-            out.push({
-              box: box.clone(),
-              center: center.clone(),
-              axis: longAxis,
-              longLen,
-              midLen,
-              score: 0,
-            });
-          }
-          return out;
-        };
-
-        const unionBoltComponent = (boxes: readonly THREE.Box3[]): ProductionBoltComponent | null => {
-          if (boxes.length === 0) return null;
-          const u = new THREE.Box3();
-          for (const b of boxes) {
-            if (b instanceof THREE.Box3 && !b.isEmpty()) u.union(b);
-          }
-          if (u.isEmpty()) return null;
-          u.getSize(size);
-          u.getCenter(center);
-          const dims = [size.x, size.y, size.z].sort((a, b) => a - b);
-          let axis = 0;
-          let longLen = size.x;
-          if (size.y > longLen) {
-            longLen = size.y;
-            axis = 1;
-          }
-          if (size.z > longLen) {
-            longLen = size.z;
-            axis = 2;
-          }
-          return {
-            box: u.clone(),
-            center: center.clone(),
-            axis,
-            longLen,
-            midLen: dims[1],
-            score: 0,
-          };
-        };
-
-        let components: ProductionBoltComponent[] = strictBoltComponents(candidateBoxes);
-        if (components.length === 0 && candidateBoxes.length > 0) {
-          components = relaxedBoltComponents(candidateBoxes);
-        }
-        if (components.length === 0) {
-          const fallbackComp = unionBoltComponent(candidateBoxes);
-          if (fallbackComp) components = [fallbackComp];
-        }
-
-        for (let ci = 0; ci < components.length; ci++) {
-          const c = components[ci]!;
-          const radius =
-            diameterM != null
-              ? Math.max(diameterM / 2, 0.004)
-              : Math.max(c.midLen * 0.45, 0.008);
-          axisDir.set(0, 0, 0).setComponent(c.axis, 1);
-          if (addMarkerDisc(c.center, axisDir, radius, `${work.boltKey}:mesh:${ci}`)) {
-            placedForBolt++;
-          }
+          /* fall through to bbox path */
         }
 
         /**
-         * Last resort for joint bolts on “secondary” members: worker element trees sometimes ship
-         * empty `core.samples`, and mesh heuristics may yield no component — the fragment AABB
-         * still sits on the isolated steel.
+         * Path 2 — world bbox fallback. When sample data is missing (worker race / minimal IFC
+         * export), use the bolt's world AABB: centre + longest-dimension axis define the
+         * centreline. Same axis-line × visible-part-AABB intersection rule applies — a bolt that
+         * doesn't pierce any visible part contributes zero discs and is hidden below.
          */
         if (placedForBolt === 0) {
-          const fb = await fetchFallbackBoxForLocal(work.localId);
+          const fb = boltLocalIdToWorldBox.get(work.localId) ?? (await fetchFallbackBoxForLocal(work.localId));
           if (fb instanceof THREE.Box3 && !fb.isEmpty()) {
-            const nearSteel = (() => {
-              if (!hasAnySteelHull) return true;
-              if (steelPerPartBoxesWorld.length > 0) {
-                for (const partBox of steelPerPartBoxesWorld) {
-                  if (!partBox || partBox.isEmpty()) continue;
-                  if (partBox.clone().expandByScalar(0.42).intersectsBox(fb)) return true;
-                }
-                return false;
-              }
-              return (
-                steelRefBoxWorld != null &&
-                !steelRefBoxWorld.isEmpty() &&
-                steelRefBoxWorld.clone().expandByScalar(0.42).intersectsBox(fb)
+            fb.getCenter(center);
+            fb.getSize(size);
+            let longAxisIdx = 0;
+            let longLen = size.x;
+            if (size.y > longLen) {
+              longLen = size.y;
+              longAxisIdx = 1;
+            }
+            if (size.z > longLen) {
+              longLen = size.z;
+              longAxisIdx = 2;
+            }
+            const axisWorldUnit = new THREE.Vector3();
+            axisWorldUnit.setComponent(longAxisIdx, 1);
+            const centerLocal = center.clone().applyMatrix4(modelWorldInverse);
+            const axisLocal = axisWorldUnit.clone().transformDirection(modelWorldInverse);
+            if (axisLocal.lengthSq() >= 1e-12) {
+              axisLocal.normalize();
+              placedForBolt += placeAxisAabbIntersectionDiscs(
+                centerLocal,
+                axisLocal,
+                holeRadius,
+                `${work.boltKey}:bbox`,
               );
-            })();
-            if (nearSteel) {
-              fb.getCenter(center);
-              fb.getSize(size);
-              let longAxis = 0;
-              let longLen = size.x;
-              if (size.y > longLen) {
-                longLen = size.y;
-                longAxis = 1;
-              }
-              if (size.z > longLen) {
-                longLen = size.z;
-                longAxis = 2;
-              }
-              axisDir.set(0, 0, 0).setComponent(longAxis, 1);
-              const fr =
-                diameterM != null
-                  ? Math.max(diameterM / 2, 0.004)
-                  : Math.max(Math.min(size.x, size.y, size.z) * 0.42, 0.008);
-              if (addMarkerDisc(center, axisDir, fr, `${work.boltKey}:bbox-fallback`)) {
-                placedForBolt++;
-              }
             }
           }
         }
 
         if (work.localId != null) {
           /**
-           * Two visibility verdicts:
-           *  (a) `placedForBolt === 0` — every disc candidate failed the on/inside test, so
-           *      neither the disc nor the bolt mesh should be on screen.
-           *  (b) bbox centroid is outside every visible per‑member box — at least one disc
-           *      passed (e.g. the bolt head landed on the plate face) but the body extends
-           *      past the displayed steel. Keep the disc and drop the cylinder.
-           * Verdict (a) suffices on its own when no bbox is available (worker / streaming
-           * race); when a bbox is present we additionally apply (b).
+           * Hide the bolt mesh when either:
+           *  (a) `placedForBolt === 0` — line missed every visible per-member AABB, so the bolt
+           *      doesn't pierce the displayed steel.
+           *  (b) Bolt body centroid is outside every visible part — discs sit on the displayed
+           *      plate face but the cylinder extends past (anchor going into concrete, or
+           *      bridging-only fastener). Keep the disc, hide the cylinder.
            */
           let shouldHide = placedForBolt === 0;
           if (!shouldHide) {

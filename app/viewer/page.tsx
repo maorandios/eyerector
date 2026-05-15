@@ -1150,7 +1150,16 @@ export default function ViewerPage() {
   const showOnlyProductionRefs = useCallback(
     async (
       refs: readonly { id: string; expressId: number | null }[],
-      holeOverlay?: Pick<ProductionHoleOverlayInput, "visibleSteelPartIds" | "visibleSteelRefs">,
+      holeOverlay?: Pick<ProductionHoleOverlayInput, "visibleSteelPartIds" | "visibleSteelRefs"> & {
+        /**
+         * חלק mode only: the single part the user is fabricating. When set,
+         * {@link ProductionHoleOverlayInput.visibleSteelPartIds} should describe the **full
+         * אסמבלי context** (so the overlay places discs on natural faces exactly like
+         * אסמבלי mode) and this field tells the overlay which part to actually keep discs on.
+         * See {@link ProductionHoleOverlayInput.productionDisplayedSteelRefs}.
+         */
+        displayedSteelRefs?: readonly { id: string; expressId: number | null }[];
+      },
     ) => {
       if (!engine || refs.length === 0) return false;
       /**
@@ -1206,6 +1215,9 @@ export default function ViewerPage() {
                     ? { visibleSteelRefs: holeOverlay.visibleSteelRefs }
                     : {}),
                   overlayBoltRows: boltsForOverlay,
+                  ...(holeOverlay?.displayedSteelRefs && holeOverlay.displayedSteelRefs.length > 0
+                    ? { productionDisplayedSteelRefs: holeOverlay.displayedSteelRefs }
+                    : {}),
                 } satisfies Parameters<ViewerEngine["primeProductionBoltAllowlistForIsolation"]>[0],
               };
             })()
@@ -1225,7 +1237,8 @@ export default function ViewerPage() {
        */
       const ok = await engine.applyIsolation("isolated", ids, {
         focus: false,
-        hideBoltsKeepHoles: false,
+        /** ייצור: steel + red hole discs only — strip bolt/nut/washer meshes after isolation merges. */
+        hideBoltsKeepHoles: true,
         enforceProductionBoltHardwareAllowlist: true,
         ...(snapshotGuids != null && snapshotGuids.size > 0
           ? {
@@ -1329,7 +1342,10 @@ export default function ViewerPage() {
       setSelectionStatus(`ייצור אסמבלי: ${row.displayMark}`);
       const visibleSteelPartIds = primary.parts.map((p) => p.id);
       const visibleSteelRefs = primary.parts.map((p) => ({ id: p.id, expressId: p.expressId }));
-      await showOnlyProductionRefs(refs, { visibleSteelPartIds, visibleSteelRefs });
+      await showOnlyProductionRefs(refs, {
+        visibleSteelPartIds,
+        visibleSteelRefs,
+      });
     },
     [clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
   );
@@ -1338,7 +1354,8 @@ export default function ViewerPage() {
     async (row: ProductionPartRow) => {
       const first = row.instances[0];
       if (!first) return;
-      const refs = row.instances.map((part) => ({ id: part.id, expressId: part.expressId }));
+      /** One IFC instance only — same rule as {@link openProductionAssembly} (not total row qty). */
+      const refs = [{ id: first.id, expressId: first.expressId }];
       setProductionSelection({ type: "part", id: first.id });
       setProductionViewerOpen(true);
       setProductionPartsDrawerOpen(false);
@@ -1358,9 +1375,13 @@ export default function ViewerPage() {
       setSelectedAssemblyId(null);
       setActiveSheet("none");
       setSelectionStatus(`ייצור חלק: ${row.displayMark}`);
-      const visibleSteelPartIds = row.instances.map((p) => p.id);
-      const visibleSteelRefs = row.instances.map((p) => ({ id: p.id, expressId: p.expressId }));
-      await showOnlyProductionRefs(refs, { visibleSteelPartIds, visibleSteelRefs });
+      const visibleSteelPartIds = [first.id];
+      const visibleSteelRefs = [{ id: first.id, expressId: first.expressId }];
+      await showOnlyProductionRefs(refs, {
+        visibleSteelPartIds,
+        visibleSteelRefs,
+        displayedSteelRefs: [{ id: first.id, expressId: first.expressId }],
+      });
     },
     [clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
   );
