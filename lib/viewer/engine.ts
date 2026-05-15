@@ -248,15 +248,35 @@ function clusterFastenerSamplesByCollinearity(
 }
 
 /**
- * Pick one hole reference per physical fastener cluster: closest to visible steel (hole mouth),
- * else midpoint along the bolt axis in model space.
+ * Distance from a world-space point to the **surface** of an axis-aligned box.
+ * (Unlike {@link THREE.Box3#clampPoint} distance, interior points get the depth to the nearest face,
+ * not zero — I-beam voids no longer make every nut sample “distance 0” from the hull.)
+ */
+function distancePointWorldToAabbSurface(box: THREE.Box3, pointWorld: THREE.Vector3): number {
+  const clamped = new THREE.Vector3();
+  box.clampPoint(pointWorld, clamped);
+  const d = pointWorld.distanceTo(clamped);
+  if (d > 1e-9) return d;
+  const { min, max } = box;
+  return Math.min(
+    pointWorld.x - min.x,
+    max.x - pointWorld.x,
+    pointWorld.y - min.y,
+    max.y - pointWorld.y,
+    pointWorld.z - min.z,
+    max.z - pointWorld.z,
+  );
+}
+
+/**
+ * Pick one hole reference per physical fastener cluster: sample with minimum distance to the steel
+ * **skin** (AABB surface), so top-flange heads win over cavity nuts; interior void tie-breaking is gone.
  */
 function pickHoleLikeSampleForCluster(
   cluster: ProductionSampleCandidate[],
   steelWorld: THREE.Box3 | null,
   modelObject: THREE.Object3D,
   tmpWorld: THREE.Vector3,
-  tmpClosest: THREE.Vector3,
 ): ProductionSampleCandidate {
   if (cluster.length === 1) return cluster[0];
   if (steelWorld && !steelWorld.isEmpty()) {
@@ -264,10 +284,9 @@ function pickHoleLikeSampleForCluster(
     let bestD = Infinity;
     for (const c of cluster) {
       tmpWorld.copy(c.pos).applyMatrix4(modelObject.matrixWorld);
-      steelWorld.clampPoint(tmpWorld, tmpClosest);
-      const d2 = tmpWorld.distanceToSquared(tmpClosest);
-      if (d2 < bestD) {
-        bestD = d2;
+      const d = distancePointWorldToAabbSurface(steelWorld, tmpWorld);
+      if (d < bestD) {
+        bestD = d;
         best = c;
       }
     }
@@ -2921,15 +2940,18 @@ export class ViewerEngine {
       }
 
       /**
-       * Drop discs clearly outside the fabricated member, but allow grip/head clearance past the
-       * tight steel AABB (secondary-side picks were rejected by the old fixed distance cap).
+       * Red discs only if the hole reference sits within this distance of the **actual steel hull**
+       * (unpadded member AABB surface). Inflated-box checks let void space “inside” a long beam’s
+       * axis-aligned bounds show discs for floating neighbour bolts that share X/Z footprint.
        */
-      let steelDiscClipBoxWorld: THREE.Box3 | null = null;
-      if (steelRefBoxWorld && !steelRefBoxWorld.isEmpty()) {
-        const diag = steelRefBoxWorld.getSize(new THREE.Vector3()).length();
-        const clipPad = THREE.MathUtils.clamp(diag * 0.042, 0.1, 0.28);
-        steelDiscClipBoxWorld = steelRefBoxWorld.clone().expandByScalar(clipPad);
-      }
+      const steelHoleDiscMaxSurfaceGapM =
+        steelRefBoxWorld && !steelRefBoxWorld.isEmpty()
+          ? THREE.MathUtils.clamp(
+              steelRefBoxWorld.getSize(new THREE.Vector3()).length() * 0.012,
+              0.012,
+              0.042,
+            )
+          : Number.POSITIVE_INFINITY;
 
       type BoltWork = {
         boltKey: string;
@@ -3111,9 +3133,10 @@ export class ViewerEngine {
         radius: number,
         dedupeId: string,
       ) => {
-        if (steelDiscClipBoxWorld) {
+        if (steelRefBoxWorld && !steelRefBoxWorld.isEmpty() && Number.isFinite(steelHoleDiscMaxSurfaceGapM)) {
           tmpDiscWorld.copy(position).applyMatrix4(this.modelObject!.matrixWorld);
-          if (steelDiscClipBoxWorld.distanceToPoint(tmpDiscWorld) > 1e-3) {
+          const surfaceDist = distancePointWorldToAabbSurface(steelRefBoxWorld, tmpDiscWorld);
+          if (surfaceDist > steelHoleDiscMaxSurfaceGapM) {
             return;
           }
         }
@@ -3333,7 +3356,6 @@ export class ViewerEngine {
       const sampleAxis = new THREE.Vector3();
 
       const steelPickWorld = new THREE.Vector3();
-      const steelPickClosest = new THREE.Vector3();
 
       for (let i = 0; i < resolved.length; i++) {
         const work = resolved[i];
@@ -3394,7 +3416,6 @@ export class ViewerEngine {
               steelRefBoxWorld,
               this.modelObject,
               steelPickWorld,
-              steelPickClosest,
             );
             addMarkerDisc(pick.pos, pick.axis, holeRadius, `${work.boltKey}:sample:${ci}`);
             placedForBolt++;

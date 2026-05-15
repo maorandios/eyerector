@@ -99,8 +99,13 @@ export function analyzerBoltsForProductionHoleOverlay(
     }
   };
 
-  /** Same joint as {@link normalizedBoltSteelGuidsForBoltLinkReach} — not only rows where `partGlobalId` ∈ visible. */
+  /** Hypergraph reach plus every row that names a visible steel part directly (covers “secondary” IFC spellings). */
   const linkKeys = new Set<string>();
+  for (const v of visibleSteelPartIds) {
+    for (const bk of normalizedBoltSteelGuidsForPart(v, boltSteelLinks)) {
+      linkKeys.add(bk);
+    }
+  }
   for (const v of visibleSteelPartIds) {
     for (const bk of normalizedBoltSteelGuidsForBoltLinkReach(v, assemblies, boltSteelLinks)) {
       linkKeys.add(bk);
