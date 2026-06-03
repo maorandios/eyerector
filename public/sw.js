@@ -1,5 +1,5 @@
 const CACHE_NAME = "eyesteel-shell-v1";
-const SHELL_FILES = ["/", "/viewer", "/manifest.webmanifest"];
+const SHELL_FILES = ["/", "/viewer", "/plan-crop", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_FILES)));

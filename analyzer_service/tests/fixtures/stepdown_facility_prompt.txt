@@ -1,0 +1,28 @@
+Create a highly complex, multi-tiered industrial step-down facility
+Total Structural Length (X-Axis): 60000mm
+Total Structural Width (Y-Axis): 30000mm
+Foundation Concrete Level: Z = 0
+Level 1 (Partial Mezzanine): Z = 3800mm (Spanning from X=0 to X=30000 only)
+Level 2 (Suspended Cantilever Deck): Z = 7600mm (Spanning from X=30000 to X=60000, projecting out from Y=0 to Y=10000)
+Main Roof Eave Line (Top of Main Columns): Z = 12000mm
+Roof Apex / Ridge Line: Z = 15000mm (Centered at Y=15000)
+Global Grid Spacing: 6000mm increments along the X-Axis
+HEAVY CONCRETE FOUNDATION: IfcSlab Thickness=600mm
+DUAL-GRID VERTICAL COLUMNS - 33 Units Total: Profile: HEB450
+Level 1 PARTIAL MEZZANINE FRAME:
+Primary Beams: 12 Units of HEB300 at Z_start=3800, Z_end=3800
+Secondary Floor Joists: 31 Lines of IPE180 every 1000mm
+Floor Deck: IfcSlab, 50mm thickness, at Z=3800
+Level 2 SUSPENDED CANTILEVER DECK:
+Cantilever Beams: 6 Units of IPE500 at Z_start=7600, Z_end=7600
+Tension Hanger Rods: 6 Units of CHS89x6
+Secondary Joists: 16 Lines of IPE140 every 600mm
+ROOF GABLE TRUSSES:
+Top Rafter Chords: Dual-slope IPE300
+Bottom Chord Ties: HEA220 at Z_start=12000, Z_end=12000
+Web Members: 8 Units per frame of RHS90x90x6 in a Warren truss pattern
+ROOF PURLINS: 14 lines of Z250x2.5
+Perimeter Wall Girts: 12 lines of C180x2.0
+TOTAL X-BRACING SYSTEM:
+Vertical Wall Bracing: first bay (X=0 to 6000) and last bay (X=54000 to 60000) CHS76x4
+FLOOR EDGE GUARDRAIL: RHS50x50x4 at Z=8700

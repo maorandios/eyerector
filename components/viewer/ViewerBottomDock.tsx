@@ -28,6 +28,7 @@ import {
   Binoculars,
   Blend,
   Bolt,
+  BookCheck,
   Camera,
   CircleX,
   EyeOff,
@@ -140,6 +141,10 @@ interface Props {
   appMode?: AppMode;
   onAppModeChange?: (mode: AppMode) => void;
   modeSwitcherOnly?: boolean;
+  /** ייצור: opens the same element details side panel as דאשבורד (assembly / part only). */
+  onProductionInfo?: () => void;
+  productionInfoSheetOpen?: boolean;
+  productionInfoDisabled?: boolean;
   selectionMode: SelectionMode;
   onSelectionModeChange: (mode: SelectionMode) => void;
   onDashboard: () => void;
@@ -215,6 +220,9 @@ export function ViewerBottomDock({
   appMode = "management",
   onAppModeChange,
   modeSwitcherOnly = false,
+  onProductionInfo,
+  productionInfoSheetOpen = false,
+  productionInfoDisabled = false,
   selectionMode,
   onSelectionModeChange,
   onDashboard,
@@ -683,6 +691,25 @@ export function ViewerBottomDock({
             {appMode === "production" ? <Hammer aria-hidden /> : <Layers2 aria-hidden />}
           </DockPillButton>
         )}
+
+        {modeSwitcherOnly && onProductionInfo ? (
+          <DockPillButton
+            label="מידע"
+            aria-pressed={productionInfoSheetOpen}
+            submenuOpen={productionInfoSheetOpen}
+            disabled={productionInfoDisabled}
+            labelClassName={productionInfoSheetOpen ? "text-zinc-900" : undefined}
+            title={
+              productionInfoDisabled
+                ? "בחר אסמבלי או חלק מרשימת הייצור"
+                : "מידע — נתוני האלמנט הנבחר. לחיצה נוספת סוגרת את הפאנל"
+            }
+            aria-label="מידע"
+            onClick={onProductionInfo}
+          >
+            <BookCheck aria-hidden />
+          </DockPillButton>
+        ) : null}
 
         {!modeSwitcherOnly ? (
           <>

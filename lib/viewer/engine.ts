@@ -2109,22 +2109,18 @@ export class ViewerEngine {
     rw.updateClippingPlanes();
   }
 
-  async loadFile(file: File) {
+  /**
+   * Removes the current IFC model from the scene and fragments registry without disposing the viewer.
+   */
+  async clearModel(): Promise<void> {
     if (this.disposed) return;
     await this.clearIsolationVisuals();
     this.clearClipping();
     this.detachSketchTilesListener();
     if (this.activeOrthoViewMode !== null) this.exitViewMode();
     this.measurementController.clearAll();
-    const { model } = await loadIfcModel(this.components, file);
-    this.ensureFragmentsClippingListeners();
-    const casted = model as {
-      modelId: string;
-      object: THREE.Object3D;
-      useCamera: (cam: THREE.PerspectiveCamera | THREE.OrthographicCamera) => void;
-    };
+    this.clearContextMainThreadVisuals();
     if (this.modelObject) {
-      this.clearContextMainThreadVisuals();
       stripSketchEdgeChildren(this.modelObject);
       this.sketchMaterialBackup.clear();
       this.sketchLodOpacityBackup.clear();
@@ -2135,7 +2131,30 @@ export class ViewerEngine {
       this.disposeSketchEdgeMaterialPool();
       this.sketchEdgesBuilt = false;
       this.world.scene.three.remove(this.modelObject);
+      this.modelObject = null;
     }
+    if (this.modelId) {
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (fragments.initialized) {
+        fragments.list.delete(this.modelId);
+        void fragments.core.update(true);
+      }
+      this.modelId = null;
+    }
+    this.boundUseCamera = null;
+    this.analyzerGuidKeyToFragmentLocal.clear();
+  }
+
+  async loadFile(file: File) {
+    if (this.disposed) return;
+    await this.clearModel();
+    const { model } = await loadIfcModel(this.components, file);
+    this.ensureFragmentsClippingListeners();
+    const casted = model as {
+      modelId: string;
+      object: THREE.Object3D;
+      useCamera: (cam: THREE.PerspectiveCamera | THREE.OrthographicCamera) => void;
+    };
     this.modelObject = casted.object;
     this.modelId = casted.modelId;
     this.analyzerGuidKeyToFragmentLocal.clear();

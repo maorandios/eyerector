@@ -39,10 +39,12 @@ import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import type { AnalyzerAssembly, AnalyzerBoltRow, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
 import { isAnalyzerBoltRow } from "@/types/domain";
-import { Bolt, LayoutList, MoveLeft, SquaresIntersect, SquaresUnite, X } from "lucide-react";
+import { Bolt, BookCheck, LayoutList, MoveLeft, SquaresIntersect, SquaresUnite, X } from "lucide-react";
 import {
   AssemblyPickDetailPanel,
   PartPickDetailPanel,
+  ProductionAssemblyPartDrillPanel,
+  ProductionAssemblyPickDetailPanel,
   ProfileGroupPickDetailPanel,
   aggregateProfilesForModelTab,
   aggregateSteelPartsForModelTab,
@@ -85,6 +87,7 @@ import {
 
 import {
   aggregateAssembliesByMark,
+  assemblyGroupKey,
   choosePreferredAssemblyForModelPick,
   countAssemblyOccurrencesInModel,
   displayAssemblyMark,
@@ -185,6 +188,10 @@ export default function ViewerPage() {
   const [selectedAssemblyId, setSelectedAssemblyId] = useState<string | null>(null);
   const [assemblyDetailOverride, setAssemblyDetailOverride] = useState<AnalyzerAssembly | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  /** ייצור אסמבלי מידע: part row drill-down inside the info panel (does not change 3D isolation). */
+  const [productionAssemblyInfoPartId, setProductionAssemblyInfoPartId] = useState<string | null>(
+    null,
+  );
   const [profileGroupDetail, setProfileGroupDetail] = useState<{
     profileLabel: string;
     instances: AnalyzerPart[];
@@ -621,6 +628,17 @@ export default function ViewerPage() {
     () => analyzerData?.parts.find((p) => p.id === selectedPartId) || null,
     [analyzerData, selectedPartId],
   );
+
+  const selectedProductionAssemblyAggregate = useMemo(() => {
+    if (!selectedAssembly) return null;
+    const key = assemblyGroupKey(selectedAssembly);
+    return aggregateAssembliesByMark(analyzerData?.assemblies ?? []).find((r) => r.key === key) ?? null;
+  }, [analyzerData?.assemblies, selectedAssembly]);
+
+  const productionAssemblyInfoPart = useMemo(() => {
+    if (!productionAssemblyInfoPartId || !selectedAssembly) return null;
+    return selectedAssembly.parts.find((p) => p.id === productionAssemblyInfoPartId) ?? null;
+  }, [productionAssemblyInfoPartId, selectedAssembly]);
 
   /** Part / profile isolation: refs + GUID sets (links with assembly fallback; spatial pass links-only when present). */
   const partIsolationBoltPolicy = useMemo(() => {
@@ -1284,6 +1302,31 @@ export default function ViewerPage() {
     [analyzerData, engine],
   );
 
+  const closeProductionViewer = useCallback(async () => {
+    if (!productionViewerOpen) return;
+    setActiveSheet("none");
+    setProductionPartsDrawerOpen(false);
+    setProductionViewerOpen(false);
+    setProductionSelection({ type: null, id: null });
+    setSelectedAssemblyId(null);
+    setSelectedPartId(null);
+    setProductionAssemblyInfoPartId(null);
+    setAssemblyDetailOverride(null);
+    setProfileGroupDetail(null);
+    engine?.clearProductionHoleOverlays();
+    if (engine) {
+      await clearEngineSelectionPreservingViewFilter(engine);
+    }
+    await restoreFullModelIsolationState();
+    setSelectionStatus("בחר אסמבלי או חלק לייצור");
+  }, [
+    clearEngineSelectionPreservingViewFilter,
+    engine,
+    productionViewerOpen,
+    restoreFullModelIsolationState,
+    setActiveSheet,
+  ]);
+
   const handleAppModeChange = useCallback(
     (nextMode: ProductionAppMode) => {
       if (appMode === nextMode) return;
@@ -1350,6 +1393,7 @@ export default function ViewerPage() {
       setAssemblyStructureNotice(false);
       setSelectedAssemblyId(primary.id);
       setSelectedPartId(null);
+      setProductionAssemblyInfoPartId(null);
       setActiveSheet("none");
       setSelectionStatus(`ייצור אסמבלי: ${row.displayMark}`);
       const visibleSteelPartIds = primary.parts.map((p) => p.id);
@@ -1385,6 +1429,7 @@ export default function ViewerPage() {
       setAssemblyStructureNotice(false);
       setSelectedPartId(first.id);
       setSelectedAssemblyId(null);
+      setProductionAssemblyInfoPartId(null);
       setActiveSheet("none");
       setSelectionStatus(`ייצור חלק: ${row.displayMark}`);
       const assemblies = analyzerData?.assemblies ?? [];
@@ -2164,6 +2209,18 @@ export default function ViewerPage() {
 
   const showDataPanel = activeSheet === "details";
   const showFilterPanel = activeSheet === "filter";
+  const productionInfoDisabled =
+    !productionViewerOpen || (!selectedAssembly && !selectedPart);
+  const showElementDataPanel =
+    showDataPanel &&
+    (appMode === "management" ||
+      (appMode === "production" && productionViewerOpen && (selectedAssembly || selectedPart)));
+
+  const handleProductionAssemblyPartInfoPick = useCallback((instances: AnalyzerPart[]) => {
+    const first = instances[0];
+    if (!first) return;
+    setProductionAssemblyInfoPartId(first.id);
+  }, []);
 
   return (
     <main
@@ -2225,7 +2282,18 @@ export default function ViewerPage() {
           <span dir="rtl">חזרה</span>
         </Button>
 
-        {multiSelectedCount > 0 ? (
+        {appMode === "production" && productionViewerOpen ? (
+          <Button
+            variant="ghost"
+            className="absolute left-1/2 z-10 h-8 -translate-x-1/2 gap-1 rounded-md px-3 text-xs font-semibold text-zinc-800 hover:bg-zinc-200/80 hover:text-zinc-950"
+            onClick={() => void closeProductionViewer()}
+            dir="rtl"
+            aria-label="סגור תצוגת ייצור — חזרה לבחירת אסמבלי או חלק"
+          >
+            <X className="size-3.5 shrink-0" aria-hidden />
+            <span>סגור</span>
+          </Button>
+        ) : multiSelectedCount > 0 ? (
           <div
             className="pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 text-xs font-medium text-zinc-700"
             dir="rtl"
@@ -2305,6 +2373,9 @@ export default function ViewerPage() {
         appMode={appMode}
         onAppModeChange={handleAppModeChange}
         modeSwitcherOnly={appMode === "production"}
+        onProductionInfo={toggleDashboardSheet}
+        productionInfoSheetOpen={activeSheet === "details"}
+        productionInfoDisabled={productionInfoDisabled}
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
         onDashboard={toggleDashboardSheet}
@@ -2458,7 +2529,7 @@ export default function ViewerPage() {
         </div>
       )}
 
-      {appMode === "management" && showDataPanel && (
+      {showElementDataPanel && (
         <div
           ref={sidePanelSnapshotRef}
           className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}
@@ -2469,7 +2540,9 @@ export default function ViewerPage() {
           >
           <div className="relative mb-4 flex min-h-8 items-center justify-between gap-3 pb-1">
             <div className="flex min-w-0 items-center gap-2">
-              {selectedAssembly ? (
+              {appMode === "production" ? (
+                <BookCheck className="size-5 shrink-0 text-zinc-600" aria-hidden />
+              ) : selectedAssembly ? (
                 <SquaresUnite className="size-5 shrink-0 text-zinc-600" aria-hidden />
               ) : selectedPart ? (
                 <SquaresIntersect className="size-5 shrink-0 text-zinc-600" aria-hidden />
@@ -2478,16 +2551,18 @@ export default function ViewerPage() {
               )}
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold text-zinc-950">
-                  {selectedAssembly
-                    ? selectedAssembly.assemblyMark ||
-                      selectedAssembly.name ||
-                      selectedAssembly.tag ||
-                      "הרכבה"
-                    : selectedPart
-                      ? isAnalyzerBoltRow(selectedPart)
-                        ? selectedPart.boltName || selectedPart.name || "בורג"
-                        : displayPartMark(selectedPart as AnalyzerPart)
-                    : "דאשבורד"}
+                  {appMode === "production"
+                    ? "מידע"
+                    : selectedAssembly
+                      ? selectedAssembly.assemblyMark ||
+                        selectedAssembly.name ||
+                        selectedAssembly.tag ||
+                        "הרכבה"
+                      : selectedPart
+                        ? isAnalyzerBoltRow(selectedPart)
+                          ? selectedPart.boltName || selectedPart.name || "בורג"
+                          : displayPartMark(selectedPart as AnalyzerPart)
+                        : "דאשבורד"}
                 </p>
               </div>
             </div>
@@ -2496,6 +2571,10 @@ export default function ViewerPage() {
               size="icon"
               className="absolute left-0 top-1/2 size-8 -translate-y-1/2 rounded-full text-zinc-500 hover:bg-zinc-200 hover:text-zinc-950"
               onClick={() => {
+                if (appMode === "production") {
+                  setActiveSheet("none");
+                  return;
+                }
                 if (selectedAssembly) {
                   void selectAssembly(null);
                   return;
@@ -2508,14 +2587,18 @@ export default function ViewerPage() {
                 setActiveSheet("none");
               }}
               aria-label={
-                selectedAssembly
-                  ? "חזרה לרשימת אמסבלי"
-                  : selectedPart
-                    ? "חזרה לרשימה"
-                    : "סגור דאשבורד"
+                appMode === "production"
+                  ? "סגור מידע"
+                  : selectedAssembly
+                    ? "חזרה לרשימת אמסבלי"
+                    : selectedPart
+                      ? "חזרה לרשימה"
+                      : "סגור דאשבורד"
               }
             >
-              {selectedAssembly || selectedPart ? (
+              {appMode === "production" ? (
+                <X className="size-4" aria-hidden />
+              ) : selectedAssembly || selectedPart ? (
                 <MoveLeft className="size-4" aria-hidden />
               ) : (
                 <X className="size-4" aria-hidden />
@@ -2526,7 +2609,34 @@ export default function ViewerPage() {
           <div
             className={`${VIEWER_SIDE_PANEL_SCROLL} min-h-0 flex-1 overflow-auto p-1.5`}
           >
-            {assemblyStructureNotice ? (
+            {appMode === "production" ? (
+              selectedAssembly ? (
+                productionAssemblyInfoPart ? (
+                  <ProductionAssemblyPartDrillPanel
+                    part={productionAssemblyInfoPart}
+                    allSteelParts={steelPartsAll}
+                    onBack={() => setProductionAssemblyInfoPartId(null)}
+                  />
+                ) : (
+                  <ProductionAssemblyPickDetailPanel
+                    assembly={selectedAssembly}
+                    productionUnits={
+                      selectedProductionAssemblyAggregate?.qty ??
+                      countAssemblyOccurrencesInModel(
+                        selectedAssembly,
+                        analyzerData?.assemblies ?? [],
+                      )
+                    }
+                    totalWeightKg={
+                      selectedProductionAssemblyAggregate?.totalWeightKg ?? selectedAssembly.weightKg
+                    }
+                    onSelectPartInstances={handleProductionAssemblyPartInfoPick}
+                  />
+                )
+              ) : selectedPart ? (
+                <PartPickDetailPanel entity={selectedPart} allSteelParts={steelPartsAll} />
+              ) : null
+            ) : assemblyStructureNotice ? (
               <p className="px-1 text-sm leading-relaxed text-zinc-700">{ASSEMBLY_STRUCTURE_NOTICE_HE}</p>
             ) : selectedAssembly ? (
               <AssemblyPickDetailPanel

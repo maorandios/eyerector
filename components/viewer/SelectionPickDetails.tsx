@@ -326,6 +326,124 @@ function KeyValueList({
   );
 }
 
+function sortedAssemblyPartRows(parts: AnalyzerPart[]) {
+  const rows = aggregateNonBoltParts(parts);
+  return [...rows].sort((r1, r2) => comparePartMarksForSort(r1.displayMark, r2.displayMark));
+}
+
+/** חלקים שייכים table — shared by management and ייצור assembly info. */
+export function AssemblyBelongingPartsTable({
+  parts,
+  onSelectPartInstances,
+}: {
+  parts: AnalyzerPart[];
+  onSelectPartInstances: (instances: AnalyzerPart[]) => void;
+}) {
+  const aggregatedRows = useMemo(() => sortedAssemblyPartRows(parts), [parts]);
+
+  return (
+    <section className="pt-5">
+      <h3 className="mb-3 flex items-center gap-1.5 px-1 text-xs font-semibold text-zinc-500">
+        <Workflow className="size-3.5 shrink-0" aria-hidden />
+        חלקים שייכים · {formatCount(parts.length)}
+      </h3>
+      <div className={`${PANEL_SCROLL} overflow-x-auto`}>
+        <table className="w-full text-xs">
+          <thead className="text-[10px] text-zinc-500">
+            <tr>
+              <th className="p-2 text-right font-medium">מספר חלק</th>
+              <th className="p-2 text-right font-medium">פרופיל</th>
+              <th className="p-2 text-right font-medium">משקל (ק״ג)</th>
+              <th className="p-2 text-right font-medium">כמות</th>
+            </tr>
+          </thead>
+          <tbody>
+            {aggregatedRows.map((row) => (
+              <tr
+                key={row.key}
+                className="cursor-pointer border-t border-zinc-200 transition-colors hover:bg-zinc-200/70"
+                onClick={() => onSelectPartInstances(row.instances)}
+              >
+                <td className="p-2 font-medium text-zinc-900">{row.displayMark}</td>
+                <td className="p-2 text-zinc-700">
+                  {row.displayProfile === "ללא שם" ? (
+                    row.displayProfile
+                  ) : (
+                    <span dir="ltr" className="inline-block text-right">
+                      {row.displayProfile}
+                    </span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap p-2 text-zinc-700">
+                  <span dir="ltr">{formatKgPlain(row.weightKg)}</span>
+                </td>
+                <td className="p-2 text-zinc-700">{formatQuantityInt(row.effectiveQty)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+/** ייצור → אסמבלי info: general fields + belonging parts only. */
+export function ProductionAssemblyPickDetailPanel({
+  assembly,
+  productionUnits,
+  totalWeightKg,
+  onSelectPartInstances,
+}: {
+  assembly: AnalyzerAssembly;
+  productionUnits: number;
+  totalWeightKg: number | null;
+  onSelectPartInstances: (instances: AnalyzerPart[]) => void;
+}) {
+  const rows = [
+    { label: "מספר אסמבלי", value: assembly.assemblyMark || EM_DASH },
+    { label: "שם אסמבלי", value: assembly.name || assembly.tag || EM_DASH },
+    {
+      label: 'משקל כולל (ק״ג)',
+      value: <span dir="ltr">{formatKgPlain(totalWeightKg ?? assembly.weightKg)}</span>,
+    },
+    { label: "יחידות לייצור", value: formatCount(productionUnits) },
+  ];
+
+  return (
+    <div className="space-y-9" dir="rtl">
+      <KeyValueList
+        title="נתונים כלליים"
+        icon={<BookCheck className="size-3.5 shrink-0" aria-hidden />}
+        rows={rows}
+      />
+      <AssemblyBelongingPartsTable parts={assembly.parts} onSelectPartInstances={onSelectPartInstances} />
+    </div>
+  );
+}
+
+/** Drill-down from חלקים שייכים in ייצור assembly info — חזרה returns to assembly panel. */
+export function ProductionAssemblyPartDrillPanel({
+  part,
+  allSteelParts,
+  onBack,
+}: {
+  part: AnalyzerPart;
+  allSteelParts?: AnalyzerPart[];
+  onBack: () => void;
+}) {
+  return (
+    <div className="space-y-5" dir="rtl">
+      <div className="flex items-start justify-between gap-2 px-1">
+        <p className="text-sm font-semibold text-zinc-950">{displayPartMark(part)}</p>
+        <Button variant="secondary" className="h-8 shrink-0 px-3 text-xs" onClick={onBack}>
+          חזרה
+        </Button>
+      </div>
+      <PartPickDetailPanel entity={part} allSteelParts={allSteelParts} />
+    </div>
+  );
+}
+
 export function AssemblyPickDetailPanel({
   assembly,
   allAssemblies,
@@ -341,20 +459,13 @@ export function AssemblyPickDetailPanel({
     [assembly.bolts],
   );
 
-  const aggregatedRows = useMemo(() => {
-    const rows = aggregateNonBoltParts(assembly.parts);
-    return [...rows].sort((r1, r2) =>
-      comparePartMarksForSort(r1.displayMark, r2.displayMark),
-    );
-  }, [assembly.parts]);
+  const aggregatedRows = useMemo(() => sortedAssemblyPartRows(assembly.parts), [assembly.parts]);
 
   const occurrencesInModel = useMemo(() => {
     return allAssemblies?.length
       ? countAssemblyOccurrencesInModel(assembly, allAssemblies)
       : 1;
   }, [assembly, allAssemblies]);
-
-  const partCountInAssembly = assembly.parts.length;
 
   const rows = [
     { label: "מספר אסמבלי", value: assembly.assemblyMark || EM_DASH },
@@ -379,7 +490,7 @@ export function AssemblyPickDetailPanel({
       <section className="pt-5">
         <h3 className="mb-3 flex items-center gap-1.5 px-1 text-xs font-semibold text-zinc-500">
           <Workflow className="size-3.5 shrink-0" aria-hidden />
-          חלקים שייכים · {formatCount(partCountInAssembly)}
+          חלקים שייכים · {formatCount(assembly.parts.length)}
         </h3>
         <div className={`${PANEL_SCROLL} overflow-x-auto`}>
           <table className="w-full text-xs">

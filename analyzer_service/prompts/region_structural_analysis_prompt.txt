@@ -1,0 +1,37 @@
+You analyze a CROPPED fragment of a structural steel plan sheet (image).
+Classify ONLY what is visible inside the crop — do not invent a full building beyond the fragment.
+
+Output RegionStructuralAnalysis JSON:
+- element_type: one of "grid", "truss", "mezzanine", "staircase", "unknown"
+- confidence: 0.0–1.0
+- detected_parameters: array of { "key": "string", "value": "string" }
+  * REQUIRED KEY: "column_profile" -> global fallback profile written on the sheet (e.g., "RHS100X100X5")
+- x_grid_positions_mm: cumulative X grid line stations in mm, MUST start at 0, strictly increasing sorted list (e.g., [0, 150, 810, 1950, 5800, 9650, 13500, 17350, 21200, 25050, 26150, 26850, 27459]). Represents ALL structural axes visible in the crop — one entry per vertical grid line. NEVER output only [0, total_span].
+- y_grid_positions_mm: cumulative Y grid line stations in mm, MUST start at 0, strictly increasing sorted list (e.g., [0, 6075, 12150]). Represents ALL horizontal grid lines in the crop. NEVER output only [0, total_span].
+- x_bay_spacings_mm / y_bay_spacings_mm: optional ordered bay WIDTHS (not cumulative) along each axis, left-to-right / bottom-to-top, when dimension strings show individual bays.
+- detected_parameters MUST include grid_lines_x_mm and grid_lines_y_mm as comma-separated copies of the full station lists (same numbers as the arrays).
+- layout_mode: "dense_matrix" OR "sparse_intersections"
+  * Use "dense_matrix" ONLY if there is a column at EVERY single X and Y intersection.
+  * Use "sparse_intersections" if some crossings are empty (e.g., secondary lines, wind columns, or gallery walls).
+- active_column_intersections: array of objects representing ONLY the actual visible columns on the plan:
+  {
+    "grid_index_x": <int, the 0-based index of this column's axis in the x_grid_positions_mm array>,
+    "grid_index_y": <int, the 0-based index of this column's axis in the y_grid_positions_mm array>,
+    "mark": "string or null", e.g., "C1", "C14"
+    "profile_name": "string or null", Explicit section size if written next to the column (e.g., "IPE200", "RHS100X100X5"). If not specified or matches the default, leave null.
+  }
+- column_profile_by_mark: array of { "mark": "string", "profile_name": "string" } mapping found in the drawing legend/labels (e.g., C14 -> IPE200).
+- notes: optional short explanation
+
+CRITICAL INSTRUCTIONS FOR COLUMN LAYOUTS:
+1. AXIS EXTRACTION: Trace each dimension chain along the crop edge. Add every bay width in order; cumulative stations = running sum from 0. If the sheet shows 9 vertical grid lines, `x_grid_positions_mm` must have 9 values (not 2). Cross-check: last station ≈ total length, and bay spacings sum to that total. Put identical lists in `grid_lines_x_mm` / `grid_lines_y_mm` detected_parameters.
+2. SPARSE MAPPING (The Index Rule): Instead of guessing or calculating raw coordinates for columns, map them strictly by their array indexes! If a column sits on the 4th X line (index 3) and the 2nd Y line (index 1), its `grid_index_x` MUST be 3 and `grid_index_y` MUST be 1.
+3. DETECTING PROFILE VARIATIONS (mandatory — read EVERY column callout):
+   - Walk the sheet column by column. For EACH visible column mark (C1, C2, C14, …), read the section text printed beside that mark or in its leader/callout box.
+   - Populate column_profile_by_mark for every distinct mark→profile pair you find in the legend OR next to columns on the plan.
+   - For each active_column_intersections entry: set profile_name ONLY when that specific column shows a section different from the global default; otherwise leave profile_name null.
+   - NEVER copy one profile (e.g. RHS100X100X5) onto the whole building if the sheet shows mixed sections (e.g. C14→IPE200, C1→HEB300). The global column_profile in detected_parameters is ONLY the fallback when a mark has no explicit size.
+   - Double-check corners, wind columns, and gallery lines — they often have different marks and profiles than interior columns.
+
+Coordinate system: origin (0,0) at bottom-left of the crop; +X right, +Y up (match structural plan convention).
+If unreadable, use element_type "unknown" and low confidence.

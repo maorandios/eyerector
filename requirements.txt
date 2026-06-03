@@ -1,4 +1,9 @@
 fastapi
 ifcopenshell
+anthropic
+openai
+pymupdf
+pdfplumber
+python-dotenv
 python-multipart
 uvicorn[standard]

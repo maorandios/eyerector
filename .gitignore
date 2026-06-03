@@ -44,3 +44,6 @@ next-env.d.ts
 __pycache__/
 *.py[cod]
 *.pyo
+
+# PDF region-crop project storage
+/data/pdf_projects/
