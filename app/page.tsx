@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { saveIfcFileForViewer } from "@/lib/browser-ifc-file-store";
@@ -17,22 +17,22 @@ export default function HomePage() {
   const [opening, setOpening] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
 
-  const persistFileForRecovery = (selectedFile: File) => {
+  const persistFileForRecovery = useCallback((selectedFile: File) => {
     void saveIfcFileForViewer(selectedFile).catch((err) => {
       console.warn("Could not persist IFC file for viewer recovery:", err);
     });
-  };
+  }, []);
 
-  const openSelectedFile = (selectedFile: File) => {
+  const openSelectedFile = useCallback((selectedFile: File) => {
     setFile(selectedFile);
     setAnalyzerData(null);
     setLoadingState("loading");
     setOpening(true);
     persistFileForRecovery(selectedFile);
     router.push("/viewer");
-  };
+  }, [persistFileForRecovery, router, setAnalyzerData, setFile, setLoadingState]);
 
-  const onFileChange = (selectedFile: File | null) => {
+  const onFileChange = useCallback((selectedFile: File | null) => {
     setError("");
     if (!selectedFile) {
       setFile(null);
@@ -48,19 +48,30 @@ export default function HomePage() {
       return;
     }
     openSelectedFile(selectedFile);
-  };
+  }, [openSelectedFile, setFile, setLoadingState]);
 
-  const selectedFileFromInputs = () =>
+  const selectedFileFromNativeInputs = useCallback(() =>
     primaryFileInputRef.current?.files?.[0] ??
     fallbackFileInputRef.current?.files?.[0] ??
-    file;
+    null, []);
+
+  const selectedFileForOpen = () => selectedFileFromNativeInputs() ?? file;
 
   const handleFileInput = (input: HTMLInputElement) => {
     onFileChange(input.files?.[0] ?? null);
   };
 
+  useEffect(() => {
+    if (opening) return;
+    const pollNativeFileInputs = window.setInterval(() => {
+      const selectedFile = selectedFileFromNativeInputs();
+      if (selectedFile) onFileChange(selectedFile);
+    }, 300);
+    return () => window.clearInterval(pollNativeFileInputs);
+  }, [onFileChange, opening, selectedFileFromNativeInputs]);
+
   const openModel = () => {
-    const selectedFile = selectedFileFromInputs();
+    const selectedFile = selectedFileForOpen();
     if (!selectedFile) {
       setError("בחר קובץ IFC ואז לחץ פתיחת מודל.");
       return;
@@ -76,21 +87,21 @@ export default function HomePage() {
           <h2 className="text-xl font-bold">{he.uploadTitle}</h2>
           <p className="text-sm leading-6 text-zinc-400">{he.uploadSubtitle}</p>
         </div>
-        <label className="relative block overflow-hidden rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-5 text-center active:border-blue-400 active:bg-blue-950/30">
+        <div className="space-y-3 rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-4 text-center">
+          <p className="text-base font-bold text-zinc-100">
+            {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
+          </p>
           <input
             ref={primaryFileInputRef}
             type="file"
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            className="block w-full rounded-2xl border border-zinc-700 bg-zinc-900 p-4 text-base text-zinc-100"
             onInput={(e) => handleFileInput(e.currentTarget)}
             onChange={(e) => handleFileInput(e.currentTarget)}
           />
-          <span className="block text-lg font-black text-zinc-100">
-            {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
-          </span>
-          <span className="mt-2 block text-sm leading-6 text-zinc-400">
-            הקש כאן ובחר קובץ מהטלפון. המודל ייפתח מיד אחרי הבחירה.
-          </span>
-        </label>
+          <p className="text-xs leading-5 text-zinc-500">
+            אחרי שהשם מופיע, המודל ייפתח אוטומטית. אם לא, לחץ פתח מודל.
+          </p>
+        </div>
         <div className="rounded-2xl border border-zinc-700 bg-zinc-950 p-3">
           <p className="mb-2 text-center text-xs font-semibold text-zinc-400">
             אם הבחירה למעלה לא מגיבה באייפון, השתמש בשדה המקורי כאן:
