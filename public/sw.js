@@ -1,4 +1,4 @@
-const CACHE_NAME = "eyesteel-shell-v1";
+const CACHE_NAME = "eyesteel-shell-v2";
 const SHELL_FILES = ["/", "/viewer", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -21,6 +21,26 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+
+  if (request.mode === "navigate") {
+    event.respondWith(
+      (async () => {
+        try {
+          const response = await fetch(request);
+          if (response && response.status === 200 && response.type === "basic") {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put(request, response.clone());
+          }
+          return response;
+        } catch {
+          const fallback = await caches.match(request) || await caches.match("/");
+          if (fallback) return fallback;
+          throw new Error("Navigation request failed and no cached fallback is available.");
+        }
+      })(),
+    );
+    return;
+  }
 
   event.respondWith(
     (async () => {

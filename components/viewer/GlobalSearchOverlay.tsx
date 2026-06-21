@@ -229,8 +229,10 @@ export function GlobalSearchOverlay({
 
   useEffect(() => {
     if (!open) return;
-    setQuery("");
-    const t = window.setTimeout(() => inputRef.current?.focus(), 0);
+    const t = window.setTimeout(() => {
+      setQuery("");
+      inputRef.current?.focus();
+    }, 0);
     return () => window.clearTimeout(t);
   }, [open]);
 
@@ -414,20 +416,18 @@ export function GlobalSearchOverlay({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[100]" dir="rtl" role="presentation">
-      <button
-        type="button"
-        className="absolute inset-0 bg-zinc-950/35 backdrop-blur-[2px]"
-        aria-label="סגור חיפוש"
-        onClick={onClose}
-      />
-      <div className="pointer-events-none relative flex justify-center px-4 pt-[max(1rem,env(safe-area-inset-top))]">
+    <div
+      className="pointer-events-none fixed inset-x-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-[60] flex justify-center px-3 md:px-4"
+      dir="rtl"
+      role="presentation"
+    >
         <div
-          className="pointer-events-auto w-full max-w-xl overflow-hidden rounded-2xl border border-zinc-300/90 bg-[#f4f6f8]/95 text-zinc-900 shadow-2xl ring-1 ring-white/70 backdrop-blur-md"
+          className="field-bottom-drawer pointer-events-auto max-h-[min(76dvh,34rem)] w-full max-w-xl overflow-hidden rounded-t-[1.75rem] border border-zinc-300/90 bg-[#f4f6f8]/95 text-zinc-900 shadow-[0_-18px_48px_rgba(15,23,42,0.22)] ring-1 ring-white/70 backdrop-blur-md sm:rounded-2xl"
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
           role="search"
         >
+          <div className="mx-auto mt-2 h-1.5 w-12 rounded-full bg-zinc-300" aria-hidden />
           <div className="flex items-center gap-2 border-b border-zinc-300/80 bg-white/80 p-2">
             <Search className="h-5 w-5 shrink-0 text-zinc-500" aria-hidden />
             <input
@@ -452,7 +452,7 @@ export function GlobalSearchOverlay({
           </div>
           <div
             className={cn(
-              "max-h-[min(70vh,28rem)] overflow-y-auto rounded-b-2xl bg-white/55",
+              "max-h-[calc(min(76dvh,34rem)-4.25rem)] overflow-y-auto rounded-b-2xl bg-white/55",
               SEARCH_SCROLLBAR_CLASS,
               query.trim() ? "" : "py-10 text-center",
             )}
@@ -485,7 +485,6 @@ export function GlobalSearchOverlay({
             )}
           </div>
         </div>
-      </div>
     </div>
   );
 }

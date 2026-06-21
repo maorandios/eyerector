@@ -28,6 +28,7 @@ import {
   Binoculars,
   Blend,
   Bolt,
+  Box,
   BookCheck,
   Camera,
   CircleX,
@@ -211,6 +212,11 @@ interface Props {
   onSnapshotDismiss?: () => void;
   /** איזומטריה ראשונית כמו בטעינת הקובץ */
   onResetView?: () => void;
+  mobileModelActive?: boolean;
+  mobileSearchActive?: boolean;
+  mobileAssembliesActive?: boolean;
+  onMobileModel?: () => void;
+  onMobileAssemblies?: () => void;
 }
 
 /**
@@ -268,6 +274,11 @@ export function ViewerBottomDock({
   onSnapshotDownload,
   onSnapshotDismiss,
   onResetView,
+  mobileModelActive = true,
+  mobileSearchActive = false,
+  mobileAssembliesActive = false,
+  onMobileModel,
+  onMobileAssemblies,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -668,7 +679,7 @@ export function ViewerBottomDock({
       ) : null}
       <div
         className={cn(
-          "pointer-events-auto flex w-full flex-nowrap items-center justify-center gap-x-0 overflow-visible border-t border-zinc-300/80 bg-[#e8ecef] px-1 py-1.5 shadow-[0_-10px_28px_rgba(39,39,42,0.08)] sm:gap-x-px sm:px-2 sm:py-2",
+          "pointer-events-auto hidden w-full flex-nowrap items-center justify-center gap-x-0 overflow-visible border-t border-zinc-300/80 bg-[#e8ecef] px-1 py-1.5 shadow-[0_-10px_28px_rgba(39,39,42,0.08)] sm:gap-x-px sm:px-2 sm:py-2 md:flex",
         )}
         dir="rtl"
       >
@@ -995,6 +1006,55 @@ export function ViewerBottomDock({
         )}
           </>
         ) : null}
+      </div>
+
+      <div
+        className="pointer-events-auto flex w-full items-center justify-center border-t border-zinc-300/80 bg-[#e8ecef]/95 px-3 py-2 shadow-[0_-14px_34px_rgba(15,23,42,0.16)] backdrop-blur-xl md:hidden"
+        dir="ltr"
+      >
+        <div className="grid w-full max-w-md grid-cols-3 gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            className={cn(
+              "h-14 flex-col gap-1 rounded-2xl text-[11px] font-bold text-zinc-700 active:scale-[0.98]",
+              mobileModelActive && "bg-white text-[#003CFF] shadow-sm",
+            )}
+            aria-pressed={mobileModelActive}
+            onClick={onMobileModel}
+          >
+            <Box className="size-5" aria-hidden />
+            <span>Model</span>
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            className={cn(
+              "h-14 flex-col gap-1 rounded-2xl text-[11px] font-bold text-zinc-700 active:scale-[0.98]",
+              mobileSearchActive && "bg-white text-[#003CFF] shadow-sm",
+            )}
+            disabled={!onGlobalSearch}
+            aria-pressed={mobileSearchActive}
+            onClick={onGlobalSearch}
+          >
+            <Search className="size-5" aria-hidden />
+            <span>Search</span>
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            className={cn(
+              "h-14 flex-col gap-1 rounded-2xl text-[11px] font-bold text-zinc-700 active:scale-[0.98]",
+              mobileAssembliesActive && "bg-white text-[#003CFF] shadow-sm",
+            )}
+            disabled={!onMobileAssemblies}
+            aria-pressed={mobileAssembliesActive}
+            onClick={onMobileAssemblies}
+          >
+            <SquaresUnite className="size-5" aria-hidden />
+            <span>Assemblies</span>
+          </Button>
+        </div>
       </div>
     </div>
   );

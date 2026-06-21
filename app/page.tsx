@@ -1,7 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { FileUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { he } from "@/lib/i18n/he";
@@ -17,6 +18,7 @@ const ANALYZER_API_URL = RAW_ANALYZER_API_URL
 
 export default function HomePage() {
   const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [error, setError] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
@@ -68,18 +70,38 @@ export default function HomePage() {
   };
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col justify-center gap-4 p-4">
-      <Card className="space-y-4">
-        <h1 className="text-2xl font-bold">{he.appName}</h1>
-        <h2 className="text-lg font-semibold">{he.uploadTitle}</h2>
-        <p className="text-sm text-zinc-400">{he.uploadSubtitle}</p>
+    <main className="mx-auto flex min-h-dvh w-full max-w-xl flex-col justify-center gap-4 p-4 safe-bottom safe-top">
+      <Card className="space-y-5 rounded-[1.75rem] border-zinc-700/80 bg-zinc-900/90 p-5 shadow-2xl">
+        <div className="space-y-2 text-center">
+          <h1 className="text-3xl font-black tracking-tight">{he.appName}</h1>
+          <h2 className="text-xl font-bold">{he.uploadTitle}</h2>
+          <p className="text-sm leading-6 text-zinc-400">{he.uploadSubtitle}</p>
+        </div>
         <input
+          ref={fileInputRef}
           type="file"
-          accept=".ifc"
-          className="w-full rounded-xl border border-dashed border-zinc-600 bg-zinc-950 p-4 text-sm"
+          accept=".ifc,.ifczip,.ifcxml,application/octet-stream,*/*"
+          className="sr-only"
           onChange={(e) => onFileChange(e.target.files?.[0] ?? null)}
         />
-        <p className="text-sm text-zinc-300">{fileName || "לא נבחר קובץ"}</p>
+        <button
+          type="button"
+          className="flex min-h-40 w-full flex-col items-center justify-center gap-3 rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-5 text-center transition active:scale-[0.99]"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <span className="flex size-14 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-300 ring-1 ring-blue-400/30">
+            <FileUp className="size-7" aria-hidden />
+          </span>
+          <span className="text-base font-bold text-zinc-100">
+            {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
+          </span>
+          <span className="max-w-xs text-xs leading-5 text-zinc-500">
+            עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה לחץ על פתיחת מודל.
+          </span>
+        </button>
+        <p className="truncate text-center text-sm font-medium text-zinc-300" dir="ltr">
+          {fileName || "לא נבחר קובץ"}
+        </p>
         {loadingState !== "idle" && (
           <p className="text-xs text-zinc-400">
             {loadingState === "loading"
@@ -94,7 +116,7 @@ export default function HomePage() {
         {error && <p className="text-sm text-red-400">{error}</p>}
         <Button
           size="lg"
-          className="w-full"
+          className="h-14 w-full rounded-2xl text-base font-bold"
           disabled={!fileName || analyzing}
           onClick={openModel}
         >

@@ -198,6 +198,7 @@ export default function ViewerPage() {
   } | null>(null);
   const [, setSelectionStatus] = useState("בחר אלמנט במודל או מהטבלה");
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [mobileAssemblySheetOpen, setMobileAssemblySheetOpen] = useState(false);
   const [markupDrawingEnabled, setMarkupDrawingEnabled] = useState(false);
   const [drawingClearSignal, setDrawingClearSignal] = useState(0);
   const markupLayerRef = useRef<DrawingMarkupLayerHandle>(null);
@@ -1305,6 +1306,7 @@ export default function ViewerPage() {
   const closeProductionViewer = useCallback(async () => {
     if (!productionViewerOpen) return;
     setActiveSheet("none");
+    setMobileAssemblySheetOpen(false);
     setProductionPartsDrawerOpen(false);
     setProductionViewerOpen(false);
     setProductionSelection({ type: null, id: null });
@@ -1332,6 +1334,7 @@ export default function ViewerPage() {
       if (appMode === nextMode) return;
       setMode(nextMode);
       setGlobalSearchOpen(false);
+      setMobileAssemblySheetOpen(false);
       setElementContextPanel(null);
       setFlashTooltip(null);
       setSnapshotSessionOpen(false);
@@ -2222,6 +2225,50 @@ export default function ViewerPage() {
     setProductionAssemblyInfoPartId(first.id);
   }, []);
 
+  const showMobileModel = useCallback(() => {
+    setMobileAssemblySheetOpen(false);
+    setGlobalSearchOpen(false);
+    setActiveSheet("none");
+  }, [setActiveSheet]);
+
+  const closeMobileDrawers = useCallback(() => {
+    setMobileAssemblySheetOpen(false);
+    setGlobalSearchOpen(false);
+  }, []);
+
+  const showMobileSearch = useCallback(() => {
+    if (loadingState !== "ready" || !analyzerData) return;
+    setMobileAssemblySheetOpen(false);
+    setActiveSheet("none");
+    setGlobalSearchOpen((open) => !open);
+  }, [analyzerData, loadingState, setActiveSheet]);
+
+  const showMobileAssemblies = useCallback(() => {
+    if (loadingState !== "ready" || !analyzerData) return;
+    setGlobalSearchOpen(false);
+    setActiveSheet("none");
+    setProductionTab("assemblies");
+    setMobileAssemblySheetOpen((open) => !open);
+  }, [analyzerData, loadingState, setActiveSheet]);
+
+  const pickMobileProductionAssembly = useCallback(
+    async (row: AggregatedAssemblyRow) => {
+      setMode("production");
+      setMobileAssemblySheetOpen(false);
+      await openProductionAssembly(row);
+    },
+    [openProductionAssembly, setMode],
+  );
+
+  const pickMobileProductionPart = useCallback(
+    async (row: ProductionPartRow) => {
+      setMode("production");
+      setMobileAssemblySheetOpen(false);
+      await openProductionPart(row);
+    },
+    [openProductionPart, setMode],
+  );
+
   return (
     <main
       className="relative h-screen w-screen overflow-hidden"
@@ -2250,8 +2297,17 @@ export default function ViewerPage() {
 
       <ViewerSnapshotToasts copyToastVisible={snapshotCopyToast} />
 
+      {(globalSearchOpen || mobileAssemblySheetOpen) && !snapshotSessionOpen ? (
+        <button
+          type="button"
+          className="absolute inset-0 z-30 cursor-default bg-transparent"
+          aria-label="סגור מגירה"
+          onClick={closeMobileDrawers}
+        />
+      ) : null}
+
       <ProductionModeOverlay
-        visible={appMode === "production"}
+        visible={appMode === "production" || mobileAssemblySheetOpen}
         viewerOpen={productionViewerOpen}
         loading={loadingState !== "ready" || !analyzerData}
         tab={productionTab}
@@ -2260,10 +2316,23 @@ export default function ViewerPage() {
         partRows={productionPartRows}
         selectedAssembly={selectedAssembly}
         partsDrawerOpen={productionPartsDrawerOpen}
+        onClose={
+          mobileAssemblySheetOpen
+            ? () => setMobileAssemblySheetOpen(false)
+            : undefined
+        }
         onTabChange={setProductionTab}
         onSearchChange={setProductionSearch}
-        onPickAssembly={(row) => void openProductionAssembly(row)}
-        onPickPart={(row) => void openProductionPart(row)}
+        onPickAssembly={(row) =>
+          void (mobileAssemblySheetOpen
+            ? pickMobileProductionAssembly(row)
+            : openProductionAssembly(row))
+        }
+        onPickPart={(row) =>
+          void (mobileAssemblySheetOpen
+            ? pickMobileProductionPart(row)
+            : openProductionPart(row))
+        }
         onPartsDrawerClose={() => setProductionPartsDrawerOpen(false)}
         onPickAssemblyPart={(part) => void handleProductionPickAssemblyPart(part)}
       />
@@ -2389,7 +2458,14 @@ export default function ViewerPage() {
           loadingState === "ready" ? toggleHideAllFastenersKeepHoles : undefined
         }
         onGlobalSearch={
-          loadingState === "ready" && analyzerData ? () => setGlobalSearchOpen(true) : undefined
+          loadingState === "ready" && analyzerData ? showMobileSearch : undefined
+        }
+        mobileModelActive={!globalSearchOpen && !mobileAssemblySheetOpen}
+        mobileSearchActive={globalSearchOpen}
+        mobileAssembliesActive={mobileAssemblySheetOpen}
+        onMobileModel={showMobileModel}
+        onMobileAssemblies={
+          loadingState === "ready" && analyzerData ? showMobileAssemblies : undefined
         }
         onSnapshot={
           loadingState === "ready" ? () => void startSnapshotSession() : undefined

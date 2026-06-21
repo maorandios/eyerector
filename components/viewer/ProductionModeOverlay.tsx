@@ -42,6 +42,7 @@ type ProductionModeOverlayProps = {
   partRows: ProductionPartRow[];
   selectedAssembly: AnalyzerAssembly | null;
   partsDrawerOpen: boolean;
+  onClose?: () => void;
   onTabChange: (tab: ProductionTab) => void;
   onSearchChange: (value: string) => void;
   onPickAssembly: (row: AggregatedAssemblyRow) => void;
@@ -78,6 +79,7 @@ export function ProductionModeOverlay({
   partRows,
   selectedAssembly,
   partsDrawerOpen,
+  onClose,
   onTabChange,
   onSearchChange,
   onPickAssembly,
@@ -90,11 +92,30 @@ export function ProductionModeOverlay({
   if (!viewerOpen) {
     return (
       <section
-        className="absolute inset-x-0 bottom-0 top-[calc(2.5rem+env(safe-area-inset-top))] z-40 flex bg-[#e8ecef] px-4 pb-[calc(6rem+env(safe-area-inset-bottom))] pt-4 text-zinc-950 sm:px-6"
+        className="pointer-events-none absolute inset-x-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-40 flex justify-center px-3 text-zinc-950 sm:px-6"
         dir="rtl"
-        aria-label="מסך מצב ייצור"
+        aria-label="מגירת אסמבליז"
       >
-        <div className="mx-auto flex min-h-0 w-full max-w-[44rem] flex-1 flex-col gap-3 overflow-hidden rounded-[1.35rem] border border-zinc-300/80 bg-[#eef1f3]/95 p-3 shadow-[0_18px_45px_rgba(39,39,42,0.16)] backdrop-blur-xl sm:p-4">
+        <div className="field-bottom-drawer pointer-events-auto flex max-h-[min(76dvh,36rem)] w-full max-w-[44rem] flex-col gap-3 overflow-hidden rounded-t-[1.75rem] border border-zinc-300/80 bg-[#eef1f3]/95 p-3 shadow-[0_-18px_48px_rgba(39,39,42,0.18)] backdrop-blur-xl sm:rounded-[1.35rem] sm:p-4">
+          <div className="mx-auto h-1.5 w-12 shrink-0 rounded-full bg-zinc-300" aria-hidden />
+          <div className="flex items-center justify-between gap-3 px-1">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#003CFF]">
+                Field Data
+              </p>
+              <h2 className="text-xl font-black text-zinc-950">Assemblies</h2>
+            </div>
+            {onClose ? (
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-9 rounded-full px-3 text-xs font-bold text-zinc-600 hover:bg-zinc-200/80 hover:text-zinc-950"
+                onClick={onClose}
+              >
+                סגור
+              </Button>
+            ) : null}
+          </div>
           <div className="grid grid-cols-2 gap-1 rounded-xl border border-zinc-300 bg-zinc-200/70 p-1">
             <button
               type="button"

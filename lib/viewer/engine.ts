@@ -656,6 +656,10 @@ export class ViewerEngine {
     renderer.onResize.add(() => {
       applyEyeSteelRendererDefaults(renderer.three);
       syncCss2dOverlay();
+      if (this.activeOrthoViewMode === null) {
+        const ctrl = this.world.camera.controls;
+        if (ctrl) this.applyPerspectiveNavigationBindings(ctrl);
+      }
     });
 
     renderer.onClippingPlanesUpdated.add(() => {
@@ -811,9 +815,24 @@ export class ViewerEngine {
     ctrl.mouseButtons.middle = A.DOLLY;
     ctrl.mouseButtons.right = A.TRUCK;
     ctrl.mouseButtons.wheel = A.DOLLY;
-    ctrl.touches.one = A.TOUCH_ROTATE;
-    ctrl.touches.two = A.TOUCH_DOLLY_TRUCK;
+    if (this.prefersFieldTouchNavigation()) {
+      ctrl.touches.one = A.TOUCH_SCREEN_PAN;
+      ctrl.touches.two = A.TOUCH_DOLLY_TRUCK;
+    } else {
+      ctrl.touches.one = A.TOUCH_ROTATE;
+      ctrl.touches.two = A.TOUCH_DOLLY_TRUCK;
+    }
     ctrl.touches.three = A.TOUCH_TRUCK;
+  }
+
+  private prefersFieldTouchNavigation(): boolean {
+    if (typeof window === "undefined") return false;
+    const coarse = window.matchMedia?.("(pointer: coarse)").matches ?? false;
+    const touchPoints = navigator.maxTouchPoints > 0;
+    const vv = window.visualViewport;
+    const w = vv?.width ?? window.innerWidth;
+    const h = vv?.height ?? window.innerHeight;
+    return coarse || touchPoints || Math.min(w, h) <= 768;
   }
 
   /** Orthographic preset: no orbit — pan (screen / truck) + orthographic zoom only. */
