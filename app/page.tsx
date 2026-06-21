@@ -16,12 +16,21 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [opening, setOpening] = useState(false);
   const [nativeFileStatus, setNativeFileStatus] = useState("");
+  const [debugStatus, setDebugStatus] = useState("JS starting");
+  const [heartbeat, setHeartbeat] = useState(0);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
 
-  const persistFileForRecovery = useCallback((selectedFile: File) => {
-    void saveIfcFileForViewer(selectedFile).catch((err) => {
-      console.warn("Could not persist IFC file for viewer recovery:", err);
-    });
+  const forceOpenViewer = useCallback(() => {
+    router.push("/viewer");
+    window.setTimeout(() => {
+      if (window.location.pathname !== "/viewer") {
+        window.location.assign("/viewer");
+      }
+    }, 900);
+  }, [router]);
+
+  const persistFileForRecovery = useCallback(async (selectedFile: File) => {
+    await saveIfcFileForViewer(selectedFile);
   }, []);
 
   const openSelectedFile = useCallback((selectedFile: File) => {
@@ -29,9 +38,18 @@ export default function HomePage() {
     setAnalyzerData(null);
     setLoadingState("loading");
     setOpening(true);
-    persistFileForRecovery(selectedFile);
-    router.push("/viewer");
-  }, [persistFileForRecovery, router, setAnalyzerData, setFile, setLoadingState]);
+    setDebugStatus(`Opening ${selectedFile.name || "IFC"} (${selectedFile.size} bytes)`);
+    void persistFileForRecovery(selectedFile)
+      .then(() => {
+        setDebugStatus("IFC saved. Opening viewer...");
+        forceOpenViewer();
+      })
+      .catch((err) => {
+        console.warn("Could not persist IFC file for viewer recovery:", err);
+        setDebugStatus("IFC save failed. Opening viewer from memory...");
+        forceOpenViewer();
+      });
+  }, [forceOpenViewer, persistFileForRecovery, setAnalyzerData, setFile, setLoadingState]);
 
   const onFileChange = useCallback((selectedFile: File | null) => {
     setError("");
@@ -39,10 +57,12 @@ export default function HomePage() {
       setFile(null);
       lastFileSigRef.current = "";
       setNativeFileStatus("");
+      setDebugStatus("No native file selected");
       return;
     }
     const displayName = selectedFile.name || "IFC";
     setNativeFileStatus(`${displayName} (${selectedFile.size.toLocaleString()} bytes)`);
+    setDebugStatus(`Detected ${displayName} size=${selectedFile.size}`);
     if (selectedFile.size === 0) {
       setLoadingState("loading");
       setError("הקובץ מופיע בטלפון אבל עדיין לא זמין לקריאה. המתן רגע או הורד אותו מקבצי iCloud ואז לחץ פתח מודל.");
@@ -55,11 +75,16 @@ export default function HomePage() {
   }, [openSelectedFile, setFile, setLoadingState]);
 
   const selectedFileFromNativeInputs = useCallback(() => {
-    const selectedFiles = [
-      primaryFileInputRef.current?.files?.[0] ?? null,
-      fallbackFileInputRef.current?.files?.[0] ?? null,
-    ].filter((selectedFile): selectedFile is File => Boolean(selectedFile));
-    return selectedFiles.find((selectedFile) => selectedFile.size > 0) ?? selectedFiles[0] ?? null;
+    try {
+      const selectedFiles = [
+        primaryFileInputRef.current?.files?.[0] ?? null,
+        fallbackFileInputRef.current?.files?.[0] ?? null,
+      ].filter((selectedFile): selectedFile is File => Boolean(selectedFile));
+      return selectedFiles.find((selectedFile) => selectedFile.size > 0) ?? selectedFiles[0] ?? null;
+    } catch (err) {
+      setDebugStatus(`Native file read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }, []);
 
   const selectedFileForOpen = () => selectedFileFromNativeInputs() ?? file;
@@ -77,13 +102,18 @@ export default function HomePage() {
     return () => window.clearInterval(pollNativeFileInputs);
   }, [onFileChange, opening, selectedFileFromNativeInputs]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setHeartbeat((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const openModel = () => {
     const selectedFile = selectedFileForOpen();
     if (!selectedFile) {
       setError("בחר קובץ IFC ואז לחץ פתיחת מודל.");
       return;
     }
-    openSelectedFile(selectedFile);
+    onFileChange(selectedFile);
   };
 
   return (
@@ -129,6 +159,10 @@ export default function HomePage() {
             Native picker: {nativeFileStatus}
           </p>
         )}
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-left text-xs text-amber-100" dir="ltr">
+          <p>JS heartbeat: {heartbeat}</p>
+          <p className="truncate">Status: {debugStatus}</p>
+        </div>
         {loadingState !== "idle" && (
           <p className="text-xs text-zinc-400">
             {loadingState === "loading"
