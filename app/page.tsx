@@ -17,6 +17,8 @@ const ANALYZER_API_URL = RAW_ANALYZER_API_URL
 
 export default function HomePage() {
   const router = useRouter();
+  const primaryFileInputRef = useRef<HTMLInputElement | null>(null);
+  const fallbackFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastFileSigRef = useRef("");
   const [error, setError] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
@@ -79,14 +81,26 @@ export default function HomePage() {
     void analyzeFileInBackground(selectedFile);
   };
 
+  const selectedFileFromInputs = () =>
+    primaryFileInputRef.current?.files?.[0] ??
+    fallbackFileInputRef.current?.files?.[0] ??
+    file;
+
   const handleFileInput = (input: HTMLInputElement) => {
     onFileChange(input.files?.[0] ?? null);
   };
 
   const openModel = async () => {
-    if (!file || analyzing) return;
+    const selectedFile = selectedFileFromInputs();
+    if (!selectedFile || analyzing) {
+      setError("בחר קובץ IFC ואז לחץ פתיחת מודל.");
+      return;
+    }
+    setFile(selectedFile);
+    setAnalyzerData(null);
+    setLoadingState("loading");
     router.push("/viewer");
-    void analyzeFileInBackground(file);
+    void analyzeFileInBackground(selectedFile);
   };
 
   return (
@@ -102,6 +116,7 @@ export default function HomePage() {
             {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
           </p>
           <input
+            ref={primaryFileInputRef}
             type="file"
             className="block w-full rounded-2xl border border-zinc-700 bg-zinc-900 p-4 text-base text-zinc-100"
             onInput={(e) => handleFileInput(e.currentTarget)}
@@ -116,6 +131,7 @@ export default function HomePage() {
             אם הכפתור למעלה לא מגיב באייפון, השתמש בשדה המקורי כאן:
           </p>
           <input
+            ref={fallbackFileInputRef}
             type="file"
             className="block w-full text-base text-zinc-100"
             onInput={(e) => handleFileInput(e.currentTarget)}
@@ -140,7 +156,7 @@ export default function HomePage() {
         <Button
           size="lg"
           className="h-14 w-full rounded-2xl text-base font-bold"
-          disabled={!fileName || analyzing}
+          disabled={analyzing}
           onClick={openModel}
         >
           {analyzing ? "מנתח מודל..." : he.openModel}
