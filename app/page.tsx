@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { saveIfcFileForViewer } from "@/lib/browser-ifc-file-store";
 import { he } from "@/lib/i18n/he";
 import { useAppStore } from "@/lib/state/app-store";
 
@@ -53,6 +54,11 @@ export default function HomePage() {
     setFile(selectedFile);
     setAnalyzerData(null);
     setLoadingState("loading");
+    try {
+      await saveIfcFileForViewer(selectedFile);
+    } catch (err) {
+      console.warn("Could not persist IFC file before viewer navigation:", err);
+    }
     router.push("/viewer");
   };
 

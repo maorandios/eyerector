@@ -12,6 +12,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
+import { loadIfcFileForViewer } from "@/lib/browser-ifc-file-store";
 import {
   ProductionModeOverlay,
   type ProductionAppMode,
@@ -204,6 +205,7 @@ export default function ViewerPage() {
   const markupLayerRef = useRef<DrawingMarkupLayerHandle>(null);
   const [snapshotCopyToast, setSnapshotCopyToast] = useState(false);
   const [snapshotSessionOpen, setSnapshotSessionOpen] = useState(false);
+  const [fileRestoreAttempted, setFileRestoreAttempted] = useState(false);
   const [elementContextPanel, setElementContextPanel] = useState<ElementPickContextPanelState | null>(
     null,
   );
@@ -215,6 +217,7 @@ export default function ViewerPage() {
   const sidePanelSnapshotRef = useRef<HTMLDivElement>(null);
   const {
     file,
+    setFile,
     analyzerData,
     mode,
     setMode,
@@ -350,8 +353,30 @@ export default function ViewerPage() {
   }, [file, setViewerTool]);
 
   useEffect(() => {
-    if (!file) router.replace("/");
-  }, [file, router]);
+    if (file || fileRestoreAttempted) return;
+    let cancelled = false;
+    loadIfcFileForViewer()
+      .then((storedFile) => {
+        if (cancelled) return;
+        if (storedFile) {
+          setFile(storedFile);
+          setLoadingState("loading");
+        }
+      })
+      .catch((err) => {
+        console.warn("Could not restore IFC file for viewer:", err);
+      })
+      .finally(() => {
+        if (!cancelled) setFileRestoreAttempted(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file, fileRestoreAttempted, setFile, setLoadingState]);
+
+  useEffect(() => {
+    if (!file && fileRestoreAttempted) router.replace("/");
+  }, [file, fileRestoreAttempted, router]);
 
   useEffect(() => {
     if (!engine || !file) return;
