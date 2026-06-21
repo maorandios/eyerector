@@ -1,19 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { he } from "@/lib/i18n/he";
 import { useAppStore } from "@/lib/state/app-store";
-
-const RAW_ANALYZER_API_URL = process.env.NEXT_PUBLIC_ANALYZER_API_URL?.trim();
-const ANALYZER_API_URL = RAW_ANALYZER_API_URL
-  ? (RAW_ANALYZER_API_URL.match(/^https?:\/\//i)
-      ? RAW_ANALYZER_API_URL
-      : `https://${RAW_ANALYZER_API_URL}`
-    ).replace(/\/$/, "")
-  : "";
 
 export default function HomePage() {
   const router = useRouter();
@@ -21,43 +13,7 @@ export default function HomePage() {
   const fallbackFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastFileSigRef = useRef("");
   const [error, setError] = useState("");
-  const [analyzing, setAnalyzing] = useState(false);
-  const [pendingViewerOpen, setPendingViewerOpen] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
-
-  useEffect(() => {
-    if (!pendingViewerOpen || !file) return;
-    router.push("/viewer");
-  }, [file, pendingViewerOpen, router]);
-
-  const analyzeFileInBackground = async (selectedFile: File) => {
-    setAnalyzing(true);
-    try {
-      const formData = new FormData();
-      const fileNameForUpload = selectedFile.name.trim().toLowerCase().endsWith(".ifc")
-        ? selectedFile.name
-        : `${selectedFile.name.trim() || "model"}.ifc`;
-      formData.append("file", selectedFile, fileNameForUpload);
-      const analyzerEndpoint = ANALYZER_API_URL
-        ? `${ANALYZER_API_URL}/analyze-ifc`
-        : "/api/analyze-ifc";
-      const response = await fetch(analyzerEndpoint, {
-        method: "POST",
-        body: formData,
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || payload.error || "Analyzer request failed");
-      }
-      const analyzerData = await response.json();
-      setAnalyzerData(analyzerData);
-    } catch (err) {
-      console.error("Analyzer failed:", err);
-      setError("המודל נפתח, אבל ניתוח הנתונים נכשל. נסה קובץ IFC אחר אם רשימות החיפוש ריקות.");
-    } finally {
-      setAnalyzing(false);
-    }
-  };
 
   const onFileChange = (selectedFile: File | null) => {
     setError("");
@@ -77,8 +33,6 @@ export default function HomePage() {
     setFile(selectedFile);
     setAnalyzerData(null);
     setLoadingState("loading");
-    setPendingViewerOpen(true);
-    void analyzeFileInBackground(selectedFile);
   };
 
   const selectedFileFromInputs = () =>
@@ -92,7 +46,7 @@ export default function HomePage() {
 
   const openModel = async () => {
     const selectedFile = selectedFileFromInputs();
-    if (!selectedFile || analyzing) {
+    if (!selectedFile) {
       setError("בחר קובץ IFC ואז לחץ פתיחת מודל.");
       return;
     }
@@ -100,7 +54,6 @@ export default function HomePage() {
     setAnalyzerData(null);
     setLoadingState("loading");
     router.push("/viewer");
-    void analyzeFileInBackground(selectedFile);
   };
 
   return (
@@ -123,7 +76,7 @@ export default function HomePage() {
             onChange={(e) => handleFileInput(e.currentTarget)}
           />
           <p className="text-center text-xs leading-5 text-zinc-500">
-            עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה המודל ייטען אוטומטית.
+            עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה לחץ פתיחת מודל.
           </p>
         </div>
         <div className="rounded-2xl border border-zinc-700 bg-zinc-950 p-3">
@@ -156,10 +109,9 @@ export default function HomePage() {
         <Button
           size="lg"
           className="h-14 w-full rounded-2xl text-base font-bold"
-          disabled={analyzing}
           onClick={openModel}
         >
-          {analyzing ? "מנתח מודל..." : he.openModel}
+          {he.openModel}
         </Button>
       </Card>
     </main>
