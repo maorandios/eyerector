@@ -111,6 +111,17 @@ export default function HomePage() {
             עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה המודל ייטען אוטומטית.
           </p>
         </div>
+        <div className="rounded-2xl border border-zinc-700 bg-zinc-950 p-3">
+          <p className="mb-2 text-center text-xs font-semibold text-zinc-400">
+            אם הכפתור למעלה לא מגיב באייפון, השתמש בשדה המקורי כאן:
+          </p>
+          <input
+            type="file"
+            className="block w-full text-base text-zinc-100"
+            onInput={(e) => handleFileInput(e.currentTarget)}
+            onChange={(e) => handleFileInput(e.currentTarget)}
+          />
+        </div>
         <p className="truncate text-center text-sm font-medium text-zinc-300" dir="ltr">
           {fileName || "לא נבחר קובץ"}
         </p>
