@@ -2,7 +2,6 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { FileUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { he } from "@/lib/i18n/he";
@@ -88,28 +87,20 @@ export default function HomePage() {
           <h2 className="text-xl font-bold">{he.uploadTitle}</h2>
           <p className="text-sm leading-6 text-zinc-400">{he.uploadSubtitle}</p>
         </div>
-        <label
-          className="relative flex min-h-40 w-full cursor-pointer flex-col items-center justify-center gap-3 overflow-hidden rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-5 text-center transition active:scale-[0.99]"
-        >
+        <div className="space-y-3 rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-4">
+          <p className="text-center text-base font-bold text-zinc-100">
+            {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
+          </p>
           <input
             type="file"
-            accept=".ifc,.ifczip,.ifcxml,application/octet-stream,*/*"
-            className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
-            onClick={(e) => {
-              e.currentTarget.value = "";
-            }}
+            accept=".ifc,.IFC,application/octet-stream,*/*"
+            className="block min-h-16 w-full rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-sm text-zinc-100 file:me-3 file:rounded-xl file:border-0 file:bg-blue-500 file:px-4 file:py-3 file:text-sm file:font-bold file:text-white"
             onChange={(e) => onFileChange(e.target.files?.[0] ?? null)}
           />
-          <span className="flex size-14 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-300 ring-1 ring-blue-400/30">
-            <FileUp className="size-7" aria-hidden />
-          </span>
-          <span className="text-base font-bold text-zinc-100">
-            {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
-          </span>
-          <span className="max-w-xs text-xs leading-5 text-zinc-500">
+          <p className="text-center text-xs leading-5 text-zinc-500">
             עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה המודל ייטען אוטומטית.
-          </span>
-        </label>
+          </p>
+        </div>
         <p className="truncate text-center text-sm font-medium text-zinc-300" dir="ltr">
           {fileName || "לא נבחר קובץ"}
         </p>
