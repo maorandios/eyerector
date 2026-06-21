@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { he } from "@/lib/i18n/he";
@@ -17,9 +17,16 @@ const ANALYZER_API_URL = RAW_ANALYZER_API_URL
 
 export default function HomePage() {
   const router = useRouter();
+  const lastFileSigRef = useRef("");
   const [error, setError] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
+  const [pendingViewerOpen, setPendingViewerOpen] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
+
+  useEffect(() => {
+    if (!pendingViewerOpen || !file) return;
+    router.push("/viewer");
+  }, [file, pendingViewerOpen, router]);
 
   const analyzeFileInBackground = async (selectedFile: File) => {
     setAnalyzing(true);
@@ -54,8 +61,12 @@ export default function HomePage() {
     setError("");
     if (!selectedFile) {
       setFile(null);
+      lastFileSigRef.current = "";
       return;
     }
+    const sig = `${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`;
+    if (sig === lastFileSigRef.current) return;
+    lastFileSigRef.current = sig;
     if (selectedFile.size === 0) {
       setLoadingState("error");
       setError("הקובץ שנבחר ריק. בחר קובץ IFC אחר.");
@@ -64,8 +75,12 @@ export default function HomePage() {
     setFile(selectedFile);
     setAnalyzerData(null);
     setLoadingState("loading");
-    router.push("/viewer");
+    setPendingViewerOpen(true);
     void analyzeFileInBackground(selectedFile);
+  };
+
+  const handleFileInput = (input: HTMLInputElement) => {
+    onFileChange(input.files?.[0] ?? null);
   };
 
   const openModel = async () => {
@@ -88,9 +103,9 @@ export default function HomePage() {
           </p>
           <input
             type="file"
-            accept=".ifc,.IFC,application/octet-stream,*/*"
-            className="block min-h-16 w-full rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-sm text-zinc-100 file:me-3 file:rounded-xl file:border-0 file:bg-blue-500 file:px-4 file:py-3 file:text-sm file:font-bold file:text-white"
-            onChange={(e) => onFileChange(e.target.files?.[0] ?? null)}
+            className="block w-full rounded-2xl border border-zinc-700 bg-zinc-900 p-4 text-base text-zinc-100"
+            onInput={(e) => handleFileInput(e.currentTarget)}
+            onChange={(e) => handleFileInput(e.currentTarget)}
           />
           <p className="text-center text-xs leading-5 text-zinc-500">
             עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה המודל ייטען אוטומטית.
