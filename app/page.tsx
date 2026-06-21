@@ -21,12 +21,8 @@ export default function HomePage() {
   const [analyzing, setAnalyzing] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
 
-  const analyzeFile = async (selectedFile: File) => {
-    setError("");
-    setFile(selectedFile);
-    setAnalyzerData(null);
+  const analyzeFileInBackground = async (selectedFile: File) => {
     setAnalyzing(true);
-    setLoadingState("parsing");
     try {
       const formData = new FormData();
       const fileNameForUpload = selectedFile.name.trim().toLowerCase().endsWith(".ifc")
@@ -46,12 +42,9 @@ export default function HomePage() {
       }
       const analyzerData = await response.json();
       setAnalyzerData(analyzerData);
-      setLoadingState("ready");
-      router.push("/viewer");
     } catch (err) {
       console.error("Analyzer failed:", err);
-      setLoadingState("error");
-      setError("ניתוח IFC נכשל. בדוק שהקובץ הוא IFC תקין ונסה שוב.");
+      setError("המודל נפתח, אבל ניתוח הנתונים נכשל. נסה קובץ IFC אחר אם רשימות החיפוש ריקות.");
     } finally {
       setAnalyzing(false);
     }
@@ -68,15 +61,17 @@ export default function HomePage() {
       setError("הקובץ שנבחר ריק. בחר קובץ IFC אחר.");
       return;
     }
-    if (!selectedFile.name.trim().toLowerCase().endsWith(".ifc")) {
-      setError("ניתן לבחור רק קובץ IFC");
-    }
-    void analyzeFile(selectedFile);
+    setFile(selectedFile);
+    setAnalyzerData(null);
+    setLoadingState("loading");
+    router.push("/viewer");
+    void analyzeFileInBackground(selectedFile);
   };
 
   const openModel = async () => {
     if (!file || analyzing) return;
-    await analyzeFile(file);
+    router.push("/viewer");
+    void analyzeFileInBackground(file);
   };
 
   return (
