@@ -14,7 +14,23 @@ export default function HomePage() {
   const fallbackFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastFileSigRef = useRef("");
   const [error, setError] = useState("");
+  const [opening, setOpening] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
+
+  const persistFileForRecovery = (selectedFile: File) => {
+    void saveIfcFileForViewer(selectedFile).catch((err) => {
+      console.warn("Could not persist IFC file for viewer recovery:", err);
+    });
+  };
+
+  const openSelectedFile = (selectedFile: File) => {
+    setFile(selectedFile);
+    setAnalyzerData(null);
+    setLoadingState("loading");
+    setOpening(true);
+    persistFileForRecovery(selectedFile);
+    router.push("/viewer");
+  };
 
   const onFileChange = (selectedFile: File | null) => {
     setError("");
@@ -31,9 +47,7 @@ export default function HomePage() {
       setError("הקובץ שנבחר ריק. בחר קובץ IFC אחר.");
       return;
     }
-    setFile(selectedFile);
-    setAnalyzerData(null);
-    setLoadingState("loading");
+    openSelectedFile(selectedFile);
   };
 
   const selectedFileFromInputs = () =>
@@ -45,21 +59,13 @@ export default function HomePage() {
     onFileChange(input.files?.[0] ?? null);
   };
 
-  const openModel = async () => {
+  const openModel = () => {
     const selectedFile = selectedFileFromInputs();
     if (!selectedFile) {
       setError("בחר קובץ IFC ואז לחץ פתיחת מודל.");
       return;
     }
-    setFile(selectedFile);
-    setAnalyzerData(null);
-    setLoadingState("loading");
-    try {
-      await saveIfcFileForViewer(selectedFile);
-    } catch (err) {
-      console.warn("Could not persist IFC file before viewer navigation:", err);
-    }
-    router.push("/viewer");
+    openSelectedFile(selectedFile);
   };
 
   return (
@@ -70,24 +76,24 @@ export default function HomePage() {
           <h2 className="text-xl font-bold">{he.uploadTitle}</h2>
           <p className="text-sm leading-6 text-zinc-400">{he.uploadSubtitle}</p>
         </div>
-        <div className="space-y-3 rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-4">
-          <p className="text-center text-base font-bold text-zinc-100">
-            {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
-          </p>
+        <label className="relative block overflow-hidden rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-5 text-center active:border-blue-400 active:bg-blue-950/30">
           <input
             ref={primaryFileInputRef}
             type="file"
-            className="block w-full rounded-2xl border border-zinc-700 bg-zinc-900 p-4 text-base text-zinc-100"
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
             onInput={(e) => handleFileInput(e.currentTarget)}
             onChange={(e) => handleFileInput(e.currentTarget)}
           />
-          <p className="text-center text-xs leading-5 text-zinc-500">
-            עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה לחץ פתיחת מודל.
-          </p>
-        </div>
+          <span className="block text-lg font-black text-zinc-100">
+            {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
+          </span>
+          <span className="mt-2 block text-sm leading-6 text-zinc-400">
+            הקש כאן ובחר קובץ מהטלפון. המודל ייפתח מיד אחרי הבחירה.
+          </span>
+        </label>
         <div className="rounded-2xl border border-zinc-700 bg-zinc-950 p-3">
           <p className="mb-2 text-center text-xs font-semibold text-zinc-400">
-            אם הכפתור למעלה לא מגיב באייפון, השתמש בשדה המקורי כאן:
+            אם הבחירה למעלה לא מגיבה באייפון, השתמש בשדה המקורי כאן:
           </p>
           <input
             ref={fallbackFileInputRef}
@@ -103,7 +109,9 @@ export default function HomePage() {
         {loadingState !== "idle" && (
           <p className="text-xs text-zinc-400">
             {loadingState === "loading"
-              ? he.loading
+              ? opening
+                ? "פותח מודל..."
+                : he.loading
               : loadingState === "parsing"
                 ? he.parsing
                 : loadingState === "ready"

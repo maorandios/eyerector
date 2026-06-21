@@ -355,22 +355,38 @@ export default function ViewerPage() {
   useEffect(() => {
     if (file || fileRestoreAttempted) return;
     let cancelled = false;
-    loadIfcFileForViewer()
-      .then((storedFile) => {
-        if (cancelled) return;
-        if (storedFile) {
-          setFile(storedFile);
-          setLoadingState("loading");
-        }
-      })
-      .catch((err) => {
-        console.warn("Could not restore IFC file for viewer:", err);
-      })
-      .finally(() => {
-        if (!cancelled) setFileRestoreAttempted(true);
-      });
+    let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+    const startedAt = Date.now();
+
+    const restoreStoredFile = () => {
+      loadIfcFileForViewer()
+        .then((storedFile) => {
+          if (cancelled) return;
+          if (storedFile) {
+            setFile(storedFile);
+            setLoadingState("loading");
+            setFileRestoreAttempted(true);
+            return;
+          }
+          if (Date.now() - startedAt < 10_000) {
+            restoreTimer = setTimeout(restoreStoredFile, 250);
+            return;
+          }
+          setFileRestoreAttempted(true);
+        })
+        .catch((err) => {
+          console.warn("Could not restore IFC file for viewer:", err);
+          if (!cancelled) setFileRestoreAttempted(true);
+        });
+    };
+
+    restoreStoredFile();
+
     return () => {
       cancelled = true;
+      if (restoreTimer) {
+        clearTimeout(restoreTimer);
+      }
     };
   }, [file, fileRestoreAttempted, setFile, setLoadingState]);
 
