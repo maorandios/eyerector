@@ -15,6 +15,7 @@ export default function HomePage() {
   const lastFileSigRef = useRef("");
   const [error, setError] = useState("");
   const [opening, setOpening] = useState(false);
+  const [nativeFileStatus, setNativeFileStatus] = useState("");
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
 
   const persistFileForRecovery = useCallback((selectedFile: File) => {
@@ -37,23 +38,29 @@ export default function HomePage() {
     if (!selectedFile) {
       setFile(null);
       lastFileSigRef.current = "";
+      setNativeFileStatus("");
+      return;
+    }
+    const displayName = selectedFile.name || "IFC";
+    setNativeFileStatus(`${displayName} (${selectedFile.size.toLocaleString()} bytes)`);
+    if (selectedFile.size === 0) {
+      setLoadingState("loading");
+      setError("הקובץ מופיע בטלפון אבל עדיין לא זמין לקריאה. המתן רגע או הורד אותו מקבצי iCloud ואז לחץ פתח מודל.");
       return;
     }
     const sig = `${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`;
     if (sig === lastFileSigRef.current) return;
     lastFileSigRef.current = sig;
-    if (selectedFile.size === 0) {
-      setLoadingState("error");
-      setError("הקובץ שנבחר ריק. בחר קובץ IFC אחר.");
-      return;
-    }
     openSelectedFile(selectedFile);
   }, [openSelectedFile, setFile, setLoadingState]);
 
-  const selectedFileFromNativeInputs = useCallback(() =>
-    primaryFileInputRef.current?.files?.[0] ??
-    fallbackFileInputRef.current?.files?.[0] ??
-    null, []);
+  const selectedFileFromNativeInputs = useCallback(() => {
+    const selectedFiles = [
+      primaryFileInputRef.current?.files?.[0] ?? null,
+      fallbackFileInputRef.current?.files?.[0] ?? null,
+    ].filter((selectedFile): selectedFile is File => Boolean(selectedFile));
+    return selectedFiles.find((selectedFile) => selectedFile.size > 0) ?? selectedFiles[0] ?? null;
+  }, []);
 
   const selectedFileForOpen = () => selectedFileFromNativeInputs() ?? file;
 
@@ -117,6 +124,11 @@ export default function HomePage() {
         <p className="truncate text-center text-sm font-medium text-zinc-300" dir="ltr">
           {fileName || "לא נבחר קובץ"}
         </p>
+        {nativeFileStatus && (
+          <p className="truncate text-center text-xs text-zinc-500" dir="ltr">
+            Native picker: {nativeFileStatus}
+          </p>
+        )}
         {loadingState !== "idle" && (
           <p className="text-xs text-zinc-400">
             {loadingState === "loading"
