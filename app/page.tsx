@@ -22,28 +22,18 @@ export default function HomePage() {
   const [analyzing, setAnalyzing] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
 
-  const onFileChange = (file: File | null) => {
+  const analyzeFile = async (selectedFile: File) => {
     setError("");
-    if (!file) {
-      setFile(null);
-      return;
-    }
-    if (!file.name.toLowerCase().endsWith(".ifc")) {
-      setError("ניתן לבחור רק קובץ IFC");
-      return;
-    }
-    setFile(file);
-    setLoadingState("ready");
-  };
-
-  const openModel = async () => {
-    if (!file) return;
-    setError("");
+    setFile(selectedFile);
+    setAnalyzerData(null);
     setAnalyzing(true);
     setLoadingState("parsing");
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      const fileNameForUpload = selectedFile.name.trim().toLowerCase().endsWith(".ifc")
+        ? selectedFile.name
+        : `${selectedFile.name.trim() || "model"}.ifc`;
+      formData.append("file", selectedFile, fileNameForUpload);
       const analyzerEndpoint = ANALYZER_API_URL
         ? `${ANALYZER_API_URL}/analyze-ifc`
         : "/api/analyze-ifc";
@@ -62,10 +52,32 @@ export default function HomePage() {
     } catch (err) {
       console.error("Analyzer failed:", err);
       setLoadingState("error");
-      setError("ניתוח IFC נכשל. בדוק ש-Python ו-IfcOpenShell מותקנים.");
+      setError("ניתוח IFC נכשל. בדוק שהקובץ הוא IFC תקין ונסה שוב.");
     } finally {
       setAnalyzing(false);
     }
+  };
+
+  const onFileChange = (selectedFile: File | null) => {
+    setError("");
+    if (!selectedFile) {
+      setFile(null);
+      return;
+    }
+    if (selectedFile.size === 0) {
+      setLoadingState("error");
+      setError("הקובץ שנבחר ריק. בחר קובץ IFC אחר.");
+      return;
+    }
+    if (!selectedFile.name.trim().toLowerCase().endsWith(".ifc")) {
+      setError("ניתן לבחור רק קובץ IFC");
+    }
+    void analyzeFile(selectedFile);
+  };
+
+  const openModel = async () => {
+    if (!file || analyzing) return;
+    await analyzeFile(file);
   };
 
   return (
@@ -95,7 +107,7 @@ export default function HomePage() {
             {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
           </span>
           <span className="max-w-xs text-xs leading-5 text-zinc-500">
-            עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה לחץ על פתיחת מודל.
+            עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה המודל ייטען אוטומטית.
           </span>
         </label>
         <p className="truncate text-center text-sm font-medium text-zinc-300" dir="ltr">
