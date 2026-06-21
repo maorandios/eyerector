@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { FileUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -18,7 +18,6 @@ const ANALYZER_API_URL = RAW_ANALYZER_API_URL
 
 export default function HomePage() {
   const router = useRouter();
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [error, setError] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
@@ -77,18 +76,18 @@ export default function HomePage() {
           <h2 className="text-xl font-bold">{he.uploadTitle}</h2>
           <p className="text-sm leading-6 text-zinc-400">{he.uploadSubtitle}</p>
         </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".ifc,.ifczip,.ifcxml,application/octet-stream,*/*"
-          className="sr-only"
-          onChange={(e) => onFileChange(e.target.files?.[0] ?? null)}
-        />
-        <button
-          type="button"
-          className="flex min-h-40 w-full flex-col items-center justify-center gap-3 rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-5 text-center transition active:scale-[0.99]"
-          onClick={() => fileInputRef.current?.click()}
+        <label
+          className="relative flex min-h-40 w-full cursor-pointer flex-col items-center justify-center gap-3 overflow-hidden rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-5 text-center transition active:scale-[0.99]"
         >
+          <input
+            type="file"
+            accept=".ifc,.ifczip,.ifcxml,application/octet-stream,*/*"
+            className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+            onClick={(e) => {
+              e.currentTarget.value = "";
+            }}
+            onChange={(e) => onFileChange(e.target.files?.[0] ?? null)}
+          />
           <span className="flex size-14 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-300 ring-1 ring-blue-400/30">
             <FileUp className="size-7" aria-hidden />
           </span>
@@ -98,7 +97,7 @@ export default function HomePage() {
           <span className="max-w-xs text-xs leading-5 text-zinc-500">
             עובד גם ממנהל הקבצים בטלפון. אחרי הבחירה לחץ על פתיחת מודל.
           </span>
-        </button>
+        </label>
         <p className="truncate text-center text-sm font-medium text-zinc-300" dir="ltr">
           {fileName || "לא נבחר קובץ"}
         </p>
