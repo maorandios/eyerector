@@ -206,6 +206,7 @@ export default function ViewerPage() {
   const [snapshotCopyToast, setSnapshotCopyToast] = useState(false);
   const [snapshotSessionOpen, setSnapshotSessionOpen] = useState(false);
   const [fileRestoreAttempted, setFileRestoreAttempted] = useState(false);
+  const [fileRestoreFailed, setFileRestoreFailed] = useState(false);
   const [elementContextPanel, setElementContextPanel] = useState<ElementPickContextPanelState | null>(
     null,
   );
@@ -365,18 +366,24 @@ export default function ViewerPage() {
           if (storedFile) {
             setFile(storedFile);
             setLoadingState("loading");
+            setFileRestoreFailed(false);
             setFileRestoreAttempted(true);
             return;
           }
-          if (Date.now() - startedAt < 10_000) {
-            restoreTimer = setTimeout(restoreStoredFile, 250);
+          if (Date.now() - startedAt < 30_000) {
+            restoreTimer = setTimeout(restoreStoredFile, 300);
             return;
           }
+          setFileRestoreFailed(true);
           setFileRestoreAttempted(true);
+          setLoadingState("error");
         })
         .catch((err) => {
           console.warn("Could not restore IFC file for viewer:", err);
-          if (!cancelled) setFileRestoreAttempted(true);
+          if (cancelled) return;
+          setFileRestoreFailed(true);
+          setFileRestoreAttempted(true);
+          setLoadingState("error");
         });
     };
 
@@ -389,10 +396,6 @@ export default function ViewerPage() {
       }
     };
   }, [file, fileRestoreAttempted, setFile, setLoadingState]);
-
-  useEffect(() => {
-    if (!file && fileRestoreAttempted) router.replace("/");
-  }, [file, fileRestoreAttempted, router]);
 
   useEffect(() => {
     if (!engine || !file) return;
@@ -2318,6 +2321,29 @@ export default function ViewerPage() {
       <div className="absolute inset-0 z-0">
         <ViewerCanvas onReady={onReady} />
       </div>
+
+      {!file && !fileRestoreAttempted ? (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/80 p-6 text-center">
+          <div className="space-y-2">
+            <p className="text-lg font-bold text-zinc-100">טוען קובץ IFC מהטלפון...</p>
+            <p className="text-sm text-zinc-400">אם הקובץ גדול, זה יכול לקחת כמה שניות.</p>
+          </div>
+        </div>
+      ) : null}
+
+      {fileRestoreFailed ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/90 p-6">
+          <div className="w-full max-w-sm space-y-4 rounded-3xl border border-zinc-700 bg-zinc-900 p-5 text-center">
+            <p className="text-lg font-bold text-zinc-100">לא נמצא קובץ IFC</p>
+            <p className="text-sm leading-6 text-zinc-400">
+              הטלפון לא הצליח להעביר את הקובץ לצופה. נסה שוב מהמסך הראשי.
+            </p>
+            <Button className="h-12 w-full rounded-2xl text-base font-bold" onClick={() => router.push("/")}>
+              חזרה להעלאה
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {loadingState === "ready" && (
         <DrawingMarkupLayer
           ref={markupLayerRef}

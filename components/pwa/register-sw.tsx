@@ -2,11 +2,14 @@
 
 import { useEffect } from "react";
 
+const SW_CLEAR_KEY = "eyerector-sw-cleared-v3";
+
 export function RegisterSW() {
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
+    if (sessionStorage.getItem(SW_CLEAR_KEY) === "1") return;
 
-    Promise.all([
+    void Promise.all([
       navigator.serviceWorker.getRegistrations().then((registrations) =>
         Promise.all(registrations.map((registration) => registration.unregister())),
       ),
@@ -15,6 +18,7 @@ export function RegisterSW() {
         : Promise.resolve([]),
     ])
       .then(() => {
+        sessionStorage.setItem(SW_CLEAR_KEY, "1");
         if (navigator.serviceWorker.controller) {
           window.location.reload();
         }

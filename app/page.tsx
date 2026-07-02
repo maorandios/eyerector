@@ -1,120 +1,80 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { saveIfcFileForViewer } from "@/lib/browser-ifc-file-store";
+import { readAndSaveIfcFile } from "@/lib/browser-ifc-file-store";
 import { he } from "@/lib/i18n/he";
 import { useAppStore } from "@/lib/state/app-store";
 
 export default function HomePage() {
-  const router = useRouter();
-  const primaryFileInputRef = useRef<HTMLInputElement | null>(null);
-  const fallbackFileInputRef = useRef<HTMLInputElement | null>(null);
-  const lastFileSigRef = useRef("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const busyRef = useRef(false);
+  const lastFailedSigRef = useRef("");
   const [error, setError] = useState("");
-  const [opening, setOpening] = useState(false);
-  const [nativeFileStatus, setNativeFileStatus] = useState("");
-  const [debugStatus, setDebugStatus] = useState("JS starting");
-  const [heartbeat, setHeartbeat] = useState(0);
-  const { setFile, file, fileName, loadingState, setLoadingState, setAnalyzerData } = useAppStore();
+  const [status, setStatus] = useState("מוכן לבחירת קובץ");
+  const [busy, setBusy] = useState(false);
+  const { setFile, fileName, setLoadingState, setAnalyzerData } = useAppStore();
 
-  const forceOpenViewer = useCallback(() => {
-    router.push("/viewer");
-    window.setTimeout(() => {
-      if (window.location.pathname !== "/viewer") {
-        window.location.assign("/viewer");
-      }
-    }, 900);
-  }, [router]);
-
-  const persistFileForRecovery = useCallback(async (selectedFile: File) => {
-    await saveIfcFileForViewer(selectedFile);
+  const openViewer = useCallback(() => {
+    setStatus("פותח צופה...");
+    window.location.assign("/viewer");
   }, []);
 
-  const openSelectedFile = useCallback((selectedFile: File) => {
-    setFile(selectedFile);
-    setAnalyzerData(null);
-    setLoadingState("loading");
-    setOpening(true);
-    setDebugStatus(`Opening ${selectedFile.name || "IFC"} (${selectedFile.size} bytes)`);
-    void persistFileForRecovery(selectedFile)
-      .then(() => {
-        setDebugStatus("IFC saved. Opening viewer...");
-        forceOpenViewer();
-      })
-      .catch((err) => {
-        console.warn("Could not persist IFC file for viewer recovery:", err);
-        setDebugStatus("IFC save failed. Opening viewer from memory...");
-        forceOpenViewer();
-      });
-  }, [forceOpenViewer, persistFileForRecovery, setAnalyzerData, setFile, setLoadingState]);
-
-  const onFileChange = useCallback((selectedFile: File | null) => {
+  const processSelectedFile = useCallback(async (selectedFile: File | null) => {
+    if (!selectedFile || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     setError("");
-    if (!selectedFile) {
-      setFile(null);
-      lastFileSigRef.current = "";
-      setNativeFileStatus("");
-      setDebugStatus("No native file selected");
-      return;
-    }
-    const displayName = selectedFile.name || "IFC";
-    setNativeFileStatus(`${displayName} (${selectedFile.size.toLocaleString()} bytes)`);
-    setDebugStatus(`Detected ${displayName} size=${selectedFile.size}`);
-    if (selectedFile.size === 0) {
-      setLoadingState("loading");
-      setError("הקובץ מופיע בטלפון אבל עדיין לא זמין לקריאה. המתן רגע או הורד אותו מקבצי iCloud ואז לחץ פתח מודל.");
-      return;
-    }
-    const sig = `${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`;
-    if (sig === lastFileSigRef.current) return;
-    lastFileSigRef.current = sig;
-    openSelectedFile(selectedFile);
-  }, [openSelectedFile, setFile, setLoadingState]);
+    setStatus(`נבחר: ${selectedFile.name || "IFC"}`);
 
-  const selectedFileFromNativeInputs = useCallback(() => {
     try {
-      const selectedFiles = [
-        primaryFileInputRef.current?.files?.[0] ?? null,
-        fallbackFileInputRef.current?.files?.[0] ?? null,
-      ].filter((selectedFile): selectedFile is File => Boolean(selectedFile));
-      return selectedFiles.find((selectedFile) => selectedFile.size > 0) ?? selectedFiles[0] ?? null;
+      const readyFile = await readAndSaveIfcFile(selectedFile, setStatus);
+      lastFailedSigRef.current = "";
+      setFile(readyFile);
+      setAnalyzerData(null);
+      setLoadingState("loading");
+      setStatus(`נשמר (${readyFile.size.toLocaleString()} bytes). פותח צופה...`);
+      openViewer();
     } catch (err) {
-      setDebugStatus(`Native file read failed: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
+      const sig = `${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`;
+      lastFailedSigRef.current = selectedFile.size > 0 ? sig : "";
+      const message =
+        err instanceof Error
+          ? err.message
+          : "לא ניתן לקרוא את הקובץ מהטלפון. הורד אותו מ-iCloud/קבצים ונסה שוב.";
+      setError(message);
+      setStatus("שגיאה בקריאת הקובץ");
+      busyRef.current = false;
+      setBusy(false);
     }
-  }, []);
+  }, [openViewer, setAnalyzerData, setFile, setLoadingState]);
 
-  const selectedFileForOpen = () => selectedFileFromNativeInputs() ?? file;
-
-  const handleFileInput = (input: HTMLInputElement) => {
-    onFileChange(input.files?.[0] ?? null);
+  const onInputChange = (input: HTMLInputElement) => {
+    void processSelectedFile(input.files?.[0] ?? null);
   };
-
-  useEffect(() => {
-    if (opening) return;
-    const pollNativeFileInputs = window.setInterval(() => {
-      const selectedFile = selectedFileFromNativeInputs();
-      if (selectedFile) onFileChange(selectedFile);
-    }, 300);
-    return () => window.clearInterval(pollNativeFileInputs);
-  }, [onFileChange, opening, selectedFileFromNativeInputs]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setHeartbeat((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   const openModel = () => {
-    const selectedFile = selectedFileForOpen();
+    const selectedFile = fileInputRef.current?.files?.[0] ?? null;
     if (!selectedFile) {
-      setError("בחר קובץ IFC ואז לחץ פתיחת מודל.");
+      setError("בחר קובץ IFC מהטלפון ואז לחץ פתח מודל.");
       return;
     }
-    onFileChange(selectedFile);
+    void processSelectedFile(selectedFile);
   };
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (busyRef.current) return;
+      const selectedFile = fileInputRef.current?.files?.[0] ?? null;
+      if (!selectedFile) return;
+      const sig = `${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`;
+      if (selectedFile.size === 0 || sig !== lastFailedSigRef.current) {
+        void processSelectedFile(selectedFile);
+      }
+    }, 400);
+    return () => window.clearInterval(timer);
+  }, [processSelectedFile]);
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-xl flex-col justify-center gap-4 p-4 safe-bottom safe-top">
@@ -124,65 +84,38 @@ export default function HomePage() {
           <h2 className="text-xl font-bold">{he.uploadTitle}</h2>
           <p className="text-sm leading-6 text-zinc-400">{he.uploadSubtitle}</p>
         </div>
+
         <div className="space-y-3 rounded-[1.5rem] border border-dashed border-zinc-600 bg-zinc-950/80 p-4 text-center">
           <p className="text-base font-bold text-zinc-100">
             {fileName ? "החלף קובץ IFC" : "בחר קובץ IFC"}
           </p>
           <input
-            ref={primaryFileInputRef}
+            ref={fileInputRef}
             type="file"
+            accept=".ifc,.IFC,application/octet-stream"
             className="block w-full rounded-2xl border border-zinc-700 bg-zinc-900 p-4 text-base text-zinc-100"
-            onInput={(e) => handleFileInput(e.currentTarget)}
-            onChange={(e) => handleFileInput(e.currentTarget)}
+            disabled={busy}
+            onInput={(e) => onInputChange(e.currentTarget)}
+            onChange={(e) => onInputChange(e.currentTarget)}
           />
           <p className="text-xs leading-5 text-zinc-500">
-            אחרי שהשם מופיע, המודל ייפתח אוטומטית. אם לא, לחץ פתח מודל.
+            אם הקובץ ב-iCloud, המתן עד שההורדה מסתיימת. אחרי הבחירה המודל ייפתח אוטומטית.
           </p>
         </div>
-        <div className="rounded-2xl border border-zinc-700 bg-zinc-950 p-3">
-          <p className="mb-2 text-center text-xs font-semibold text-zinc-400">
-            אם הבחירה למעלה לא מגיבה באייפון, השתמש בשדה המקורי כאן:
-          </p>
-          <input
-            ref={fallbackFileInputRef}
-            type="file"
-            className="block w-full text-base text-zinc-100"
-            onInput={(e) => handleFileInput(e.currentTarget)}
-            onChange={(e) => handleFileInput(e.currentTarget)}
-          />
+
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-center text-sm text-amber-100">
+          {status}
         </div>
-        <p className="truncate text-center text-sm font-medium text-zinc-300" dir="ltr">
-          {fileName || "לא נבחר קובץ"}
-        </p>
-        {nativeFileStatus && (
-          <p className="truncate text-center text-xs text-zinc-500" dir="ltr">
-            Native picker: {nativeFileStatus}
-          </p>
-        )}
-        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-left text-xs text-amber-100" dir="ltr">
-          <p>JS heartbeat: {heartbeat}</p>
-          <p className="truncate">Status: {debugStatus}</p>
-        </div>
-        {loadingState !== "idle" && (
-          <p className="text-xs text-zinc-400">
-            {loadingState === "loading"
-              ? opening
-                ? "פותח מודל..."
-                : he.loading
-              : loadingState === "parsing"
-                ? he.parsing
-                : loadingState === "ready"
-                  ? he.ready
-                  : "שגיאה"}
-          </p>
-        )}
+
         {error && <p className="text-sm text-red-400">{error}</p>}
+
         <Button
           size="lg"
           className="h-14 w-full rounded-2xl text-base font-bold"
+          disabled={busy}
           onClick={openModel}
         >
-          {he.openModel}
+          {busy ? "קורא קובץ..." : he.openModel}
         </Button>
       </Card>
     </main>
